@@ -57,22 +57,53 @@ Recommended runtime stack:
 - Worker: Rust + Tokio + ffmpeg invocation.
 - Frontend: SvelteKit + HTML5 video (HLS.js if needed).
 - Object storage: AWS S3.
-- Metadata DB: Postgres (MVP), with notes for DynamoDB migration path.
+- Metadata DB: Postgres (MVP). Cost-optimized STG-Lite can run Postgres in a Docker container on EC2; production-like target is managed Postgres (RDS).
 - Async trigger: SQS queue (or S3 event -> webhook endpoint for MVP).
 - CDN: CloudFront in front of S3 for manifests/segments.
 
 STG deployment profile options:
 - `STG-Lite (lowest cost, recommended first)`:
   - 1 small VM/container host for API + worker.
-  - 1 Postgres instance (or managed low-tier DB).
+  - Postgres as a Docker container on the same host (cost-first setup).
   - S3 + CloudFront + SQS.
+  - ALB as internet ingress; API Gateway intentionally omitted in STG-Lite to stay within interview budget.
   - No multi-AZ and minimal autoscaling.
 - `STG-Prod-Like (higher confidence, higher cost)`:
   - API on ECS/EC2 behind ALB.
   - API Gateway HTTP API in front of ALB.
-  - Worker as separate service/queue consumer.
+  - Worker split into separate services/instance pools:
+    - `Chunker` pool (extracts streamable clips / packaging steps).
+    - `Transcoder` pool (per-rendition jobs such as 360p/720p/1080p).
   - Managed Postgres (RDS), S3, CloudFront, SQS.
   - Optional autoscaling group for API.
+
+STG-Lite database note:
+- For interview-budget environments, prefer local Postgres container on EC2.
+- Keep DB private to the host/network; do not expose 5432 publicly.
+- Example bootstrap command:
+```bash
+docker run -d \
+  --name stg-postgres \
+  --restart unless-stopped \
+  -e POSTGRES_DB=video_stg \
+  -e POSTGRES_USER=video_app \
+  -e POSTGRES_PASSWORD='change_me' \
+  -v pgdata:/var/lib/postgresql/data \
+  -p 127.0.0.1:5432:5432 \
+  postgres:16
+```
+- Ideal future upgrade path: move to RDS Postgres when higher availability/ops isolation is required.
+
+API Gateway decision note:
+- Current plan intentionally omits API Gateway in STG-Lite for cost control and reduced setup complexity.
+- STG-Lite ingress path is `Client -> ALB -> API service`.
+- Production-like path can be `Client -> API Gateway -> ALB/API service` when budget allows.
+- Benefits of API Gateway (document in final architecture notes):
+  - central auth integration points (future auth/JWT/OIDC)
+  - request throttling and quotas
+  - request/response transformation and validation
+  - unified API lifecycle features (stages, versioning, usage plans)
+  - tighter integration with WAF/observability and managed edge behavior
 
 Why this shape:
 - Fast to implement.
@@ -104,6 +135,8 @@ Core components:
 - `Metadata DB`
   - Source of truth for video lifecycle state.
   - State transitions and manifest pointers.
+  - STG-Lite implementation: Postgres container on EC2 host.
+  - Production-like implementation: RDS Postgres in private subnets.
 - `CDN (CloudFront)`
   - Cache manifests/segments for stream performance and lower egress costs.
 
@@ -385,6 +418,19 @@ Worker execution model:
 - Retry transient failures with capped attempts + backoff.
 - Move permanent failures to `FAILED` with error details.
 
+Processing deployment modes:
+- `STG-Lite` (budget): one worker process/instance performs chunking + transcoding stages.
+- `Scale-out mode` (diagram-aligned): separate chunker and transcoder pools.
+  - Ingest queue/event triggers chunker.
+  - Chunker emits per-rendition transcode jobs.
+  - Multiple transcoder instances consume jobs in parallel (horizontal scale).
+  - This can be deployed as EC2 instance groups or ECS services.
+
+Where horizontal scaling happens for processing:
+- Increase `Chunker` instances when upload completion events back up.
+- Increase `Transcoder` instances when rendition queue depth grows.
+- Keep API scaling independent from processing scaling.
+
 Idempotency:
 - Derive output keys from `video_id` and rendition.
 - Safe overwrite of partial artifacts.
@@ -434,6 +480,8 @@ CDN content and policy:
 - Prioritize first-play experience:
   - ensure manifest + first few segments are cacheable immediately
   - optional: prefetch/warm first 2-3 segments for newly ready videos in STG tests
+- Current STG CloudFront distribution domain (use this for playback URL construction):
+  - `d38ixt0cyn1hi6.cloudfront.net`
 
 Low-cost STG guidance:
 - Start with `STG-Lite` and scale only after demo stability.
@@ -550,20 +598,59 @@ Project is done when all are true:
 - Architecture document explains scaling, consistency, and cost decisions.
 - Basic automated tests pass for critical paths.
 
+## 20A) STG AWS Resource Inventory (Keep Updated)
+
+Purpose:
+- This section is the runtime source of truth for already-created AWS resources.
+- Update this table whenever resource names/IDs/endpoints change.
+- LLMs should read this section first before executing deployment/checklist steps.
+
+Region baseline:
+- Primary region: `ap-northeast-1`
+
+### 20A.1 Resource Table
+
+| Resource Type | Logical Role | Name / ID | Domain / Endpoint / URL | ARN | Notes |
+|---|---|---|---|---|---|
+| ALB | Public ingress for app/API | `stg-api-alb` | `stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com` |  | Temporary STG endpoint |
+| CloudFront Distribution | CDN for playback artifacts |  | `d38ixt0cyn1hi6.cloudfront.net` |  | Use for playback manifest/segment URLs |
+| S3 Bucket | Upload source bucket | `stg-video-upload-1a` |  | `arn:aws:s3:::stg-video-upload-1a` | Has upload-complete event notifications |
+| S3 Bucket | Processed artifacts bucket |  |  |  | Fill bucket name/ARN |
+| SQS Queue | Legacy/general processing queue (if retained) | `stg-video-processing` |  |  | Keep only if still used |
+| SQS Queue | Chunker input queue |  |  |  | Fill exact queue name/URL/ARN |
+| SQS Queue | Transcoder job queue |  |  |  | Fill exact queue name/URL/ARN |
+| SQS Queue | Chunker DLQ |  |  |  | Optional |
+| SQS Queue | Transcoder DLQ |  |  |  | Optional |
+| VPC | STG network |  | CIDR: `10.0.0.0/16` |  | Fill VPC ID |
+| Subnets | Public subnets (2 AZ) |  |  |  | Fill subnet IDs |
+| Subnets | Private subnets (2 AZ) |  |  |  | Fill subnet IDs |
+| Security Group | Public ingress SG | `sg-public-entry` |  |  | ALB-facing rules |
+| Security Group | API SG | `sg-api` |  |  | App port from `sg-public-entry` only |
+| Security Group | Worker SG | `sg-worker` |  |  | No public inbound |
+| Security Group | DB SG | `sg-db` |  |  | 5432 only from `sg-api`/`sg-worker` |
+| Security Group | Admin SSH SG | `sg-admin-ssh` |  |  | SSH from your IP only |
+| EC2 Instance | Primary app/worker host |  |  |  | Fill instance ID, private/public IP |
+| EC2 Instance | Chunker host/service (if separate) |  |  |  | Fill if provisioned separately |
+| EC2 Instance | Transcoder host/service (if separate) |  |  |  | Fill if provisioned separately |
+| IAM Role | EC2 app/worker role |  |  |  | Fill role name/ARN |
+
+### 20A.2 Runtime Config Values (For App/Worker Integration)
+
+| Config Key | Current Value | Notes |
+|---|---|---|
+| `STG_ALB_DNS` | `stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com` | App/API temporary public endpoint |
+| `CDN_BASE_URL` | `https://d38ixt0cyn1hi6.cloudfront.net` | Build `manifestCdnUrl` from this |
+| `AWS_REGION` | `ap-northeast-1` | |
+| `UPLOAD_BUCKET` | `stg-video-upload-1a` | |
+| `PROCESSED_BUCKET` |  | Fill value |
+| `SQS_CHUNKER_QUEUE_URL` |  | Fill value |
+| `SQS_TRANSCODER_QUEUE_URL` |  | Fill value |
+| `DATABASE_URL` |  | Fill value when app wiring starts |
+
 ## 21) Ordered What-To-Do-Next Checklist
 
 This list is intentionally execution-ordered; completing all items should produce a functioning exam-compliant project.
 Checked items (`[x]`) are done items.
-
-- [ ] 0a. Create AWS account and secure it (root MFA, IAM admin user, least-privilege app roles).
-- [ ] 0b. Configure AWS Budgets + billing alerts before provisioning resources.
-- [ ] 0c. Create STG networking baseline (VPC, subnets, security groups).
-- [ ] 0d. Provision storage and queue primitives (S3 upload bucket, S3 processed bucket, SQS queue, optional DLQ).
-- [ ] 0e. Provision compute + database for STG:
-  - `STG-Lite`: single API/worker host + Postgres.
-  - `STG-Prod-Like`: API service + worker service + managed Postgres.
-- [ ] 0f. Provision ingress components for STG (API Gateway HTTP API and/or ALB) and route API traffic.
-- [ ] 0g. Provision CloudFront distribution in front of processed-video bucket.
 
 - [ ] 1a. Create monorepo folders (`backend`, `worker`, `frontend`, `docs`) and base READMEs.
 - [ ] 1b. Add local dev config (`.env.example`, docker-compose for Postgres/local S3 emulator if used).
@@ -611,12 +698,64 @@ Checked items (`[x]`) are done items.
 - [ ] 11c. Write `docs/operational-costs.md` with S3/CDN/lifecycle decisions and tradeoffs.
 - [ ] 11d. Add explicit citations to files under `references/` for requirement traceability.
 - [ ] 11e. Document STG deployment topology, resource list, and monthly cost guardrails.
+- [ ] 11f. Add ADR/note: API Gateway omitted in STG-Lite for cost; include benefits and upgrade path to production-like ingress.
 
 - [ ] 12a. Run final end-to-end demo scenario and capture expected outputs.
 - [ ] 12b. Verify the requirement checklist in Section 3 item-by-item.
 - [ ] 12c. Prepare final submission notes describing what is implemented vs documented tradeoffs.
 
-## 22) Optional Upgrades (Only If Time Remains)
+## 22) AWS Checklist (0-Step Items)
+
+Checked items (`[x]`) are done items.
+
+- [x] 0a. Create AWS account and secure it (root MFA, IAM admin user, least-privilege app roles).
+- [x] 0b. Configure AWS Budgets + billing alerts before provisioning resources.
+- [ ] 0c. Create STG networking baseline (complete all `0c.x` items below).
+- [x] 0c.1 Create 1 VPC for STG (example CIDR: `10.0.0.0/16`).
+- [x] 0c.2 Create 2 public subnets (different AZs) for internet-facing ingress.
+- [x] 0c.3 Create 2 private subnets (different AZs) for API app, worker, and DB.
+- [x] 0c.4 Attach Internet Gateway to VPC and create public route table: `0.0.0.0/0 -> IGW`.
+- [x] 0c.5 Associate public subnets to public route table; associate private subnets to private route table.
+- [ ] 0c.6 Ensure only ingress layer is public:
+- [ ] 0c.6a Public path components: `CloudFront` + (`API Gateway` and/or `ALB`).
+- [ ] 0c.6b Private components: API service tasks/instances, worker, Postgres, internal queues.
+- [x] 0c.7 Create security groups with least privilege:
+- [x] 0c.7a `sg-public-entry`: inbound `443` from `0.0.0.0/0` (and optional `80` redirect).
+- [x] 0c.7b `sg-api`: inbound app port only from `sg-public-entry`.
+- [x] 0c.7c `sg-worker`: no inbound from internet.
+- [x] 0c.7d `sg-db`: inbound `5432` only from `sg-api` and `sg-worker`.
+- [ ] 0c.8 Set public accessibility rules for review:
+- [ ] 0c.8a Public: website domain, upload/status/playback API routes, CloudFront video paths (`*.m3u8`, `*.ts`/`*.m4s`).
+- [ ] 0c.8b Private: DB endpoints, worker endpoints, S3 buckets (no public bucket/object access).
+- [x] 0c.8c If company provides fixed egress CIDRs, add optional IP allowlist via WAF for review paths.
+- [ ] 0c.9 Validate networking before app deploy:
+- [ ] 0c.9a Confirm public URL reachability from external network.
+- [ ] 0c.9b Confirm private resources are unreachable from internet.
+- [ ] 0c.9c Confirm API can reach DB and worker can reach S3/SQS.
+- [x] 0d. Provision storage and queue primitives (S3 upload bucket, S3 processed bucket, SQS queue, optional DLQ).
+- [x] 0e. Provision compute + database for STG:
+  - `STG-Lite`: single API/worker host + Postgres container (cost-first).
+  - `STG-Prod-Like`: API service + worker service + managed Postgres (RDS).
+- [x] 0e.1 Launch primary STG EC2 instance for app services (API + worker).
+- [x] 0e.2 Install Docker and run Postgres container on EC2 (`postgres:16`) with persistent volume.
+- [x] 0e.3 Keep Postgres access private (bind `127.0.0.1:5432` or private subnet only).
+- [ ] 0e.4 Configure API/worker env vars to use containerized Postgres connection string.
+- [ ] 0e.5 Document that RDS Postgres is the production-like replacement when budget/ops requirements increase.
+- [x] 0e.6 (Scale-out option) Provision separate compute for processing pools:
+  - `chunker` instance/service
+  - `transcoder` instance/service(s)
+- [x] 0e.7 (Scale-out option) Use separate queue stages for processing:
+  - upload-complete -> chunker queue
+  - chunker output -> transcoder queue (per rendition jobs)
+- [ ] 0e.8 (Scale-out option) Configure autoscaling triggers for processing pools based on queue depth.
+- [x] 0f. Provision ingress components for STG (API Gateway HTTP API and/or ALB) and route API traffic.
+- [x] 0f.1 Current STG ALB DNS endpoint (temporary public endpoint for app/API access):
+  - `stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com`
+- [x] 0g. Provision CloudFront distribution in front of processed-video bucket.
+- [x] 0g.1 Current STG CloudFront distribution domain (temporary CDN endpoint for playback):
+  - `d38ixt0cyn1hi6.cloudfront.net`
+
+## 23) Optional Upgrades (Only If Time Remains)
 
 - S3 event-driven auto-triggering (instead of API-triggered enqueue only).
 - Queue service hardening (SQS visibility timeout tuning, dead-letter queues).
