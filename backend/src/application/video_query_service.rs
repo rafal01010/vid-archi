@@ -1,17 +1,22 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 
 use crate::http::error::{AppError, AppResult};
+use crate::infrastructure::config::AppConfig;
 use crate::infrastructure::postgres::{VideoDetailRecord, VideoRepository, VideoSummaryRecord};
 
 #[derive(Clone)]
 pub struct VideoQueryService {
+    config: Arc<AppConfig>,
     repository: VideoRepository,
     max_recent_video_limit: usize,
 }
 
 impl VideoQueryService {
-    pub fn new(repository: VideoRepository) -> Self {
+    pub fn new(config: AppConfig, repository: VideoRepository) -> Self {
         Self {
+            config: Arc::new(config),
             repository,
             max_recent_video_limit: 100,
         }
@@ -64,7 +69,7 @@ impl VideoQueryService {
             .await?
             .ok_or_else(|| AppError::not_found("video not found"))?;
 
-        Ok(map_video_details(video))
+        Ok(map_video_details(&self.config, video))
     }
 }
 
@@ -140,7 +145,7 @@ fn map_video_summary(video: VideoSummaryRecord) -> VideoSummary {
     }
 }
 
-fn map_video_details(video: VideoDetailRecord) -> VideoDetailsResult {
+fn map_video_details(config: &AppConfig, video: VideoDetailRecord) -> VideoDetailsResult {
     VideoDetailsResult {
         public_id: video.public_id.clone(),
         title: video.title,
@@ -150,7 +155,10 @@ fn map_video_details(video: VideoDetailRecord) -> VideoDetailsResult {
         created_at: video.created_at,
         updated_at: video.updated_at,
         playback_path: format!("/v/{}", video.public_id),
-        manifest_url: None,
+        manifest_url: video
+            .manifest_s3_key
+            .as_deref()
+            .and_then(|manifest_key| config.manifest_url_for_key(manifest_key)),
     }
 }
 

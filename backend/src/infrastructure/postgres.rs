@@ -78,7 +78,8 @@ impl VideoRepository {
                 status::text AS status,
                 is_streamable,
                 created_at,
-                updated_at
+                updated_at,
+                manifest_s3_key
             FROM videos
             WHERE public_id = $1
             "#,
@@ -388,4 +389,5 @@ pub struct VideoDetailRecord {
     pub is_streamable: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub manifest_s3_key: Option<String>,
 }

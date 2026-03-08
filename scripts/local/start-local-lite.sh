@@ -35,4 +35,6 @@ fi
 echo "Starting MinIO services for local object storage"
 docker compose up -d minio minio-bootstrap
 
-"${REPO_ROOT}/scripts/stg/start-stg-lite.sh" --env-file "${ENV_FILE}"
+"${REPO_ROOT}/scripts/stg/start-stg-app-host.sh" --env-file "${ENV_FILE}"
+"${REPO_ROOT}/scripts/stg/start-stg-chunker-host.sh" --env-file "${ENV_FILE}"
+"${REPO_ROOT}/scripts/stg/start-stg-transcoder-host.sh" --env-file "${ENV_FILE}"

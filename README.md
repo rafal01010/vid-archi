@@ -1,14 +1,14 @@
-# Video Streaming project
+# Video Streaming Project
 
-This repository contains the implementation for a minimal private video streaming service built for the take-home exam described in [PROJECT_IMPLEMENTATION_PLAN.md](/Users/dave/LabBase/vid-archi/PROJECT_IMPLEMENTATION_PLAN.md).
+This repository contains a minimal private video streaming system for the take-home exam described in [PROJECT_IMPLEMENTATION_PLAN.md](/Users/dave/LabBase/vid-archi/PROJECT_IMPLEMENTATION_PLAN.md).
 
-The project is being developed with these constraints in mind:
-- Rust for the backend API and background worker.
+The project constraints are:
+- Rust for the backend API plus processing services.
 - Svelte for the frontend.
 - AWS S3, SQS, CloudFront, EC2, and Postgres-backed metadata.
-- Architecture quality and maintainable code are higher priority than feature breadth.
+- Architecture quality and clean code are more important than breadth.
 
-The authoritative requirement and design references are:
+Primary references:
 - [SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md](/Users/dave/LabBase/vid-archi/references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md)
 - [youtube_system_design_reference.md](/Users/dave/LabBase/vid-archi/references/youtube_system_design_reference.md)
 - [Youtube-problem-writeup.md](/Users/dave/LabBase/vid-archi/references/Youtube-problem-writeup.md)
@@ -18,177 +18,129 @@ The authoritative requirement and design references are:
 ## Repository Layout
 
 ```text
-backend/    Rust API service
-worker/     Rust background processing service
-frontend/   Svelte frontend
-docs/       Architecture, API, and operational documentation
-config/     Shared policy/config source-of-truth files used by multiple services
-references/ Provided exam requirements and design references
+backend/      Rust API service
+chunker/      Rust processing service that claims baseline jobs and dispatches rendition jobs
+transcoder/   Rust processing service that builds one configured HLS rendition
+frontend/     Svelte frontend
+docs/         Architecture, API, and operational documentation
+config/       Shared policy/config source-of-truth files
+references/   Provided exam requirements and design references
 ```
 
 ## Shared Policy Source Of Truth
 
-Upload and transcoding constants are defined in [config/video_policy.json](/Users/dave/LabBase/vid-archi/config/video_policy.json). Later Rust and Svelte code should read from this policy file or mirror it directly with the same canonical names.
+[config/video_policy.json](/Users/dave/LabBase/vid-archi/config/video_policy.json) defines the upload and transcoding policy used across services.
 
-The current policy captures:
-- maximum upload size: `1GB`
-- allowed input MIME types: `video/mp4`, `video/quicktime`, `video/webm`, `video/x-msvideo`, `video/vnd.avi`
-- baseline rendition profile: `360p` HLS with `H.264 + AAC`
-- adaptive rendition ladder: `360p`, `480p`, `720p`, `1080p`, `1440p`, `2160p`
-- no upscaling: renditions must not exceed the original source resolution
+Current policy highlights:
+- max upload size: `1GB`
+- accepted input MIME types: `video/mp4`, `video/quicktime`, `video/webm`, `video/x-msvideo`, `video/vnd.avi`
+- baseline rendition: `360p` HLS with `H.264 + AAC`
+- adaptive ladder: `360p`, `480p`, `720p`, `1080p`, `1440p`, `2160p`
+- no upscaling beyond source dimensions
 
-## Local Development Bootstrap
+## Runtime Shape
 
-1. Copy `.env.example` to `.env`.
-2. First-time local setup: run `./scripts/local/deploy-local-lite.sh --bootstrap-db`.
-3. Normal local redeploys: run `./scripts/local/deploy-local-lite.sh`.
-4. Open the frontend at `http://127.0.0.1:4173`.
-5. Optional: stop the packaged local stack with `./scripts/local/stop-local-lite.sh`.
+The implemented shape is now split the way the project plan describes:
+- app host EC2:
+  - Rust API
+  - Svelte frontend
+  - Postgres container
+- chunker host EC2:
+  - Dockerized `chunker` container(s) from `chunker/docker-compose.yml`
+- transcoder host EC2:
+  - Dockerized `transcoder` containers from `transcoder/docker-compose.yml`
 
-The local stack is intentionally lightweight:
-- Postgres for metadata and job state.
-- MinIO as an S3-compatible local object store.
-- No local queue container yet; SQS wiring will be added when the upload and worker flows are implemented.
+The runtime YAML now lives inside the service folders so they are portable on their own. Examples:
 
-## Local Run Scripts
+```bash
+docker compose -f chunker/docker-compose.yml up -d --scale chunker=2 chunker
+```
 
-The infrastructure, backend upload API, and Svelte homepage/upload flow are now scaffolded locally behind one packaged local deploy path. The worker is still pending.
+```bash
+docker compose -f transcoder/docker-compose.yml up -d \
+  --scale transcoder-360p=1 \
+  --scale transcoder-480p=1 \
+  --scale transcoder-720p=1 \
+  --scale transcoder-1080p=1 \
+  --scale transcoder-1440p=1 \
+  --scale transcoder-2160p=1 \
+  transcoder-360p transcoder-480p transcoder-720p transcoder-1080p transcoder-1440p transcoder-2160p
+```
 
-Available scripts:
+That keeps `chunker/` and `transcoder/` independently deployable while still letting you scale each workload separately.
+
+## Processing Flow
+
+1. `POST /api/videos` validates input, creates metadata, and opens a multipart upload.
+2. `POST /api/videos/{videoId}/parts/sign` returns presigned part URLs.
+3. `POST /api/videos/{videoId}/complete` finalizes the source upload, marks the video `UPLOADED`, and inserts a parent `BASELINE` row into `processing_jobs`.
+4. A `chunker` container atomically claims that baseline job, moves the video to `PROCESSING_BASELINE`, downloads the source object, runs `ffprobe`, stores source dimensions, and inserts one row into `transcoding_jobs` for the baseline `360p` rendition.
+5. A `transcoder` container that is configured for `TRANSCODER_RENDITION=360p` claims that job, runs `ffmpeg` to completion for a full VOD-style `360p` package, uploads `videos/{video_id}/hls/master.m3u8`, `videos/{video_id}/hls/360p/360p.m3u8`, and all HLS segments into the processed bucket, then marks the rendition `READY`.
+6. Only after that full baseline package exists does the transcoder set `videos.manifest_s3_key`, `is_streamable=true`, and `status=BASELINE_READY`.
+7. `GET /api/videos/{publicId}` returns `manifestUrl` only after that shared DB state is present.
+
+The code already supports per-rendition transcoder containers. Step `7a` through `7d` in the plan still covers finishing the non-baseline renditions and final `READY` state.
+
+## Scripts
+
+Primary deploy/start scripts:
+- app host deploy: `./scripts/stg/deploy-stg-app-host.sh`
+- app host start: `./scripts/stg/start-stg-app-host.sh`
+- chunker host deploy: `./scripts/stg/deploy-stg-chunker-host.sh`
+- chunker host start: `./scripts/stg/start-stg-chunker-host.sh`
+- transcoder host deploy: `./scripts/stg/deploy-stg-transcoder-host.sh`
+- transcoder host start: `./scripts/stg/start-stg-transcoder-host.sh`
+
+Service packaging scripts:
 - `./backend/scripts/deploy-backend.sh`
-- `./frontend/scripts/deploy-frontend.sh`
-- `./frontend/scripts/run-stg-frontend.sh`
-- `./backend/scripts/run-stg-api.sh`
+- `./chunker/scripts/deploy-chunker.sh`
+- `./transcoder/scripts/deploy-transcoder.sh`
+
+Local wrappers:
 - `./scripts/local/deploy-local-lite.sh`
 - `./scripts/local/start-local-lite.sh`
 - `./scripts/local/stop-local-lite.sh`
-- `./scripts/stg/deploy-stg-lite.sh`
-- `./scripts/stg/start-stg-lite.sh`
-- `./.env.local`
 
-Typical local flow:
+For the real EC2 layout, run the app-host scripts on the app EC2 instance, the chunker scripts on the chunker EC2 instance, and the transcoder scripts on the transcoder EC2 instance.
 
-```bash
-./scripts/local/deploy-local-lite.sh --bootstrap-db
-```
+## Local Development
 
-Later local redeploys:
+1. Copy `.env.example` to `.env.local` or `.env`.
+2. First local bootstrap: `./scripts/local/deploy-local-lite.sh --bootstrap-db`
+3. Later local redeploys: `./scripts/local/deploy-local-lite.sh`
+4. Frontend: `http://127.0.0.1:4173`
+5. API: `http://127.0.0.1:8080`
 
-```bash
-./scripts/local/deploy-local-lite.sh
-```
+Local runtime:
+- Postgres container
+- MinIO
+- Rust API
+- Svelte frontend
+- Dockerized `chunker` and `transcoder` services started from their own folders
 
-Reset the local packaged Postgres database completely:
+## Current Status
 
-```bash
-./scripts/local/deploy-local-lite.sh --reset-db
-```
+Implemented now:
+- multipart upload API
+- deterministic public share links
+- homepage recent-video listing
+- share-page metadata endpoint
+- split processing pipeline for `chunker` and `transcoder`
+- per-service Docker runtime files inside `chunker/` and `transcoder/`
+- baseline `360p` HLS generation and `BASELINE_READY` gating
 
-Restart the packaged local services without rebuilding:
+Still pending:
+- dedicated playback metadata endpoint from step `6a`
+- browser HLS playback integration from step `6b` to `6d`
+- non-baseline rendition production flow from step `7a` to `7d`
+- retry/metrics/health work from later steps
 
-```bash
-./scripts/local/start-local-lite.sh
-```
+## Tests
 
-Stop the packaged local services:
-
-```bash
-./scripts/local/stop-local-lite.sh
-```
-
-Apply only new database migrations:
-
-```bash
-./scripts/local/deploy-local-lite.sh --migrate-db
-```
-
-What "running locally" means right now:
-- Local packaged Postgres container is up.
-- MinIO container is up.
-- Local buckets for uploads and processed artifacts are created.
-- Axum upload API is available on `http://127.0.0.1:8080`.
-- Svelte homepage is available on `http://127.0.0.1:4173`.
-
-What is not available yet:
-- worker processing pipeline
-- HLS playback integration
-
-## Implemented API And Frontend Flow
-
-Checklist step `3a/3b/3c` is implemented in the Rust backend, and step `4a/4b/4c` now has a frontend implementation:
-- `POST /api/videos`
-- `GET /api/videos`
-- `GET /api/videos/{publicId}`
-- `POST /api/videos/{videoId}/parts/sign`
-- `POST /api/videos/{videoId}/complete`
-
-Current flow:
-1. `POST /api/videos` validates the upload against [config/video_policy.json](/Users/dave/LabBase/vid-archi/config/video_policy.json), generates a deterministic `public_id`, creates the `videos` row, opens an `upload_sessions` row, and initializes the S3 multipart upload.
-2. `POST /api/videos/{videoId}/parts/sign` returns presigned `PUT` URLs for the requested part numbers and moves the video from `INITIATED` to `UPLOADING` on first use.
-3. `POST /api/videos/{videoId}/complete` completes the multipart upload in S3, marks the video as `UPLOADED`, and inserts the baseline processing job in `processing_jobs`.
-4. `GET /api/videos` returns the homepage library, sorted newest first with pagination metadata.
-5. `GET /api/videos/{publicId}` resolves the share-page route and returns the current lifecycle state for that public video ID.
-
-Frontend behavior:
-- `/` is now both the upload page and the recent-upload homepage.
-- The homepage shows the newest 10 videos first and exposes next/previous pagination.
-- Multipart parts are uploaded directly from the browser to S3/MinIO using presigned `PUT` URLs.
-- After completion, the page displays the share URL and refreshes the homepage library.
-- `/v/[publicId]` now resolves the public video ID and shows current status; HLS playback wiring remains a later checklist item.
-- The frontend theme is monochrome: black, white, and gray only.
-
-The backend reads the shared policy file for:
-- max upload size
-- allowed MIME types
-- allowed file extensions
-
-Example create-upload request:
-
-```json
-{
-  "filename": "demo.mp4",
-  "contentType": "video/mp4",
-  "sizeBytes": 52428800,
-  "title": "Demo upload"
-}
-```
-
-The `publicId` share slug is deterministic. It is built from a sanitized title-or-filename slug plus a lowercase base32 token derived from the internal `video_id`. That keeps share links stable, readable, and unique without adding a separate random slug generator.
-
-More detail is in [docs/api.md](/Users/dave/LabBase/vid-archi/docs/api.md) and [backend/README.md](/Users/dave/LabBase/vid-archi/backend/README.md).
-
-## Minimal Testing
-
-The backend now includes Rust unit tests for the main generated upload-path logic.
-
-Rust unit tests cover the main generated logic:
-- deterministic `public_id` generation
-- upload policy validation
-- filename sanitizing and multipart normalization helpers
-
-Run them with:
+Run the implemented Rust tests with:
 
 ```bash
 cargo test --manifest-path backend/Cargo.toml
+cargo test --manifest-path chunker/Cargo.toml --offline
+cargo test --manifest-path transcoder/Cargo.toml --offline
 ```
-
-## Deploy-Time Test Gate
-
-The deployment helper can run unit tests before packaging the backend binary:
-
-```bash
-./backend/scripts/deploy-backend.sh --run-tests
-```
-
-That is a standard CI/CD pattern. Unit tests are the usual pre-build or pre-deploy gate.
-
-## Postgres Persistence
-
-The packaged local deployment flow stores Postgres data in a named Docker volume attached to the local packaged Postgres container (`local-lite-postgres` by default).
-
-That means:
-- stopping the container does not remove the data volume
-- restarting or recreating the container on the same machine keeps the database data when the named volume is reused
-- data is lost only if you remove the named volume explicitly, such as `docker volume rm local-lite-postgres-data`, or if the host disk is lost
-
-For STG on EC2, the same persistence rule applies if the Postgres container uses a named volume or bind mount on the instance. Container restarts do not delete the database by themselves, but losing the EC2 disk or instance without a backup will.

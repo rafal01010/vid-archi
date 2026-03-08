@@ -29,12 +29,5 @@ fi
 
 mkdir -p "${REPO_ROOT}/logs"
 
-echo "Starting backend service"
 "${REPO_ROOT}/backend/scripts/run-stg-api.sh" --env-file "${ENV_FILE}" --background
-
-echo "Starting frontend service"
 "${REPO_ROOT}/frontend/scripts/run-stg-frontend.sh" --env-file "${ENV_FILE}" --background
-
-echo "STG-Lite services started"
-echo "Backend log: ${REPO_ROOT}/logs/backend.log"
-echo "Frontend log: ${REPO_ROOT}/logs/frontend.log"

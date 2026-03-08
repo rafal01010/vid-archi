@@ -28,6 +28,23 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM pg_type
+    WHERE typname = 'transcoding_job_status'
+  ) THEN
+    CREATE TYPE transcoding_job_status AS ENUM (
+      'QUEUED',
+      'RUNNING',
+      'SUCCEEDED',
+      'FAILED'
+    );
+  END IF;
+END
+$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_type
     WHERE typname = 'upload_session_status'
   ) THEN
     CREATE TYPE upload_session_status AS ENUM (
@@ -164,22 +181,21 @@ CREATE TABLE IF NOT EXISTS videos (
   CONSTRAINT videos_streamable_requires_streamable_status
     CHECK (
       NOT is_streamable
-      OR status IN ('BASELINE_READY', 'READY')
+      OR status IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY')
     ),
-  CONSTRAINT videos_baseline_ready_requires_timestamp
+  CONSTRAINT videos_streamable_status_requires_baseline_artifacts
     CHECK (
-      status <> 'BASELINE_READY'
-      OR baseline_ready_at IS NOT NULL
+      status NOT IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY')
+      OR (
+        is_streamable = TRUE
+        AND manifest_s3_key IS NOT NULL
+        AND baseline_ready_at IS NOT NULL
+      )
     ),
-  CONSTRAINT videos_ready_requires_timestamps
+  CONSTRAINT videos_ready_requires_ready_timestamp
     CHECK (
       status <> 'READY'
-      OR (
-        baseline_ready_at IS NOT NULL
-        AND ready_at IS NOT NULL
-        AND manifest_s3_key IS NOT NULL
-        AND is_streamable = TRUE
-      )
+      OR ready_at IS NOT NULL
     )
 );
 
@@ -214,6 +230,10 @@ CREATE INDEX IF NOT EXISTS upload_sessions_status_idx
 
 CREATE INDEX IF NOT EXISTS upload_sessions_expires_at_idx
   ON upload_sessions (expires_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS upload_sessions_one_open_session_per_video_idx
+  ON upload_sessions (video_id)
+  WHERE status = 'OPEN';
 
 CREATE TABLE IF NOT EXISTS upload_parts (
   session_id UUID NOT NULL REFERENCES upload_sessions (id) ON DELETE CASCADE,
@@ -263,11 +283,24 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT processing_jobs_attempt_valid
     CHECK (attempt > 0),
-  CONSTRAINT processing_jobs_finished_after_started
+  CONSTRAINT processing_jobs_status_timestamps_valid
     CHECK (
-      finished_at IS NULL
-      OR started_at IS NULL
-      OR finished_at >= started_at
+      (
+        status = 'QUEUED'
+        AND started_at IS NULL
+        AND finished_at IS NULL
+      )
+      OR (
+        status = 'RUNNING'
+        AND started_at IS NOT NULL
+        AND finished_at IS NULL
+      )
+      OR (
+        status IN ('SUCCEEDED', 'FAILED')
+        AND started_at IS NOT NULL
+        AND finished_at IS NOT NULL
+        AND finished_at >= started_at
+      )
     )
 );
 
@@ -279,6 +312,54 @@ CREATE INDEX IF NOT EXISTS processing_jobs_status_idx
 
 CREATE INDEX IF NOT EXISTS processing_jobs_created_at_idx
   ON processing_jobs (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS transcoding_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  processing_job_id UUID NOT NULL REFERENCES processing_jobs (id) ON DELETE CASCADE,
+  video_id UUID NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
+  rendition video_rendition_name NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  status transcoding_job_status NOT NULL DEFAULT 'QUEUED',
+  worker_id TEXT,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT transcoding_jobs_attempt_valid
+    CHECK (attempt > 0),
+  CONSTRAINT transcoding_jobs_status_timestamps_valid
+    CHECK (
+      (
+        status = 'QUEUED'
+        AND started_at IS NULL
+        AND finished_at IS NULL
+      )
+      OR (
+        status = 'RUNNING'
+        AND started_at IS NOT NULL
+        AND finished_at IS NULL
+      )
+      OR (
+        status IN ('SUCCEEDED', 'FAILED')
+        AND started_at IS NOT NULL
+        AND finished_at IS NOT NULL
+        AND finished_at >= started_at
+      )
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS transcoding_jobs_video_id_rendition_attempt_idx
+  ON transcoding_jobs (video_id, rendition, attempt);
+
+CREATE UNIQUE INDEX IF NOT EXISTS transcoding_jobs_processing_job_id_rendition_attempt_idx
+  ON transcoding_jobs (processing_job_id, rendition, attempt);
+
+CREATE INDEX IF NOT EXISTS transcoding_jobs_status_idx
+  ON transcoding_jobs (status);
+
+CREATE INDEX IF NOT EXISTS transcoding_jobs_rendition_status_idx
+  ON transcoding_jobs (rendition, status, created_at);
 
 DROP TRIGGER IF EXISTS videos_set_updated_at ON videos;
 CREATE TRIGGER videos_set_updated_at
@@ -301,6 +382,12 @@ EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS processing_jobs_set_updated_at ON processing_jobs;
 CREATE TRIGGER processing_jobs_set_updated_at
 BEFORE UPDATE ON processing_jobs
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS transcoding_jobs_set_updated_at ON transcoding_jobs;
+CREATE TRIGGER transcoding_jobs_set_updated_at
+BEFORE UPDATE ON transcoding_jobs
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 

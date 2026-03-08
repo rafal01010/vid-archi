@@ -1,20 +1,20 @@
 # API Contract
 
-This document reflects the API currently implemented in the Rust backend.
+This document reflects the API currently implemented in the Rust backend and the split baseline-processing pipeline formed by `chunker` plus `transcoder`.
 
 ## Homepage And Share-Page Read Flow
 
 1. `GET /api/videos?page=1&pageSize=10`
 2. `GET /api/videos/{publicId}`
 
-The frontend homepage now uses a combined flow:
-- upload a new video directly from `/`
-- refresh the recent uploads library after completion
-- click any library entry to open the share-page route `/v/{publicId}`
+The frontend currently uses these endpoints to:
+- upload a new video from `/`
+- refresh the recent-video library after upload completion
+- open `/v/{publicId}` for share-page status
 
 ## `GET /api/videos?page=1&pageSize=10`
 
-Returns the most recent videos, sorted newest first by `created_at`, with homepage pagination metadata.
+Returns the most recent videos ordered by `created_at DESC`.
 
 Response:
 
@@ -43,9 +43,15 @@ Response:
 
 ## `GET /api/videos/{publicId}`
 
-Returns the current lifecycle state and route metadata for a single public share ID.
+Returns the current lifecycle state and share-page metadata for a public video.
 
-Response:
+The endpoint behavior is now:
+- resolve the stable `publicId`
+- read `status`, `is_streamable`, and `manifest_s3_key` from Postgres
+- build `manifestUrl` from `PROCESSED_ASSET_BASE_URL`, `CDN_BASE_URL`, or the local processed-bucket base URL
+- expose `manifestUrl` only after the baseline transcoder has published the full `360p` VOD-style HLS package and marked the video `BASELINE_READY`
+
+Response before baseline is ready:
 
 ```json
 {
@@ -61,18 +67,34 @@ Response:
 }
 ```
 
+Response after baseline is ready:
+
+```json
+{
+  "publicId": "demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "title": "Demo upload",
+  "originalFilename": "demo.mp4",
+  "status": "BASELINE_READY",
+  "isStreamable": true,
+  "createdAt": "2026-03-08T14:00:00Z",
+  "updatedAt": "2026-03-08T14:05:30Z",
+  "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8"
+}
+```
+
 ## Upload Session Flow
 
 1. `POST /api/videos`
 2. `POST /api/videos/{videoId}/parts/sign`
-3. client uploads file parts directly to S3 or MinIO with the returned presigned `PUT` URLs
+3. client uploads file parts directly to S3 or MinIO
 4. `POST /api/videos/{videoId}/complete`
 
-The API keeps video bytes off the backend request path. The backend only creates metadata, upload sessions, and presigned instructions.
+The API only creates metadata, upload sessions, and presigned instructions. Video bytes do not pass through the backend.
 
 ## `POST /api/videos`
 
-Creates the video metadata row, reserves the deterministic share link, opens the multipart upload session in object storage, and returns the upload instructions.
+Creates the video metadata row, reserves the deterministic share link, opens the multipart upload in object storage, and returns the upload instructions.
 
 Request:
 
@@ -134,7 +156,7 @@ Response:
 
 ## `POST /api/videos/{videoId}/complete`
 
-Completes the multipart upload in object storage and transitions the metadata row to `UPLOADED`.
+Completes the multipart upload and queues the baseline processing flow.
 
 Request:
 
@@ -162,10 +184,12 @@ Response:
 }
 ```
 
-## Status Transition In This Step
+## Status Transition In The Current Implementation
 
-- Create upload: `INITIATED`
-- First successful part-sign request: `UPLOADING`
-- Complete upload: `UPLOADED`
+- create upload: `INITIATED`
+- first part-sign request: `UPLOADING`
+- complete upload: `UPLOADED`
+- chunker claim: `PROCESSING_BASELINE`
+- baseline transcoder publishes the full `360p` playlist and its segments: `BASELINE_READY`
 
-The read endpoints let the homepage and the share page reflect those transitions immediately. The homepage currently uses the paginated read endpoint to show the newest 10 videos first. The next checklist step will consume the queued `BASELINE` job and move the video into the processing states.
+The existing share-page endpoint is the current playback metadata source. Once `manifest_s3_key` is present, it returns `manifestUrl` for the baseline stream.

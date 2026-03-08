@@ -25,7 +25,7 @@ Shell-script rule:
   - local execution
   - STG deployment/build/startup handoff
   - environment variable loading from `.env` or a passed env file
-  - STG-Lite orchestration for frontend + backend + Postgres container on the primary EC2 host when that deployment mode is used
+  - app-host and processing-host deployment/build/startup handoff when services run on separate EC2 instances
 
 ## 2.1) Mandatory Post-Generation Verification Rule
 
@@ -34,8 +34,10 @@ After generating or editing code, immediately run the relevant unit tests before
 Current required commands:
 - Rust backend changes:
   - `cargo test --manifest-path backend/Cargo.toml`
-- Rust worker changes:
-  - add a matching `cargo test --manifest-path worker/Cargo.toml` command once the worker crate exists
+- Rust chunker changes:
+  - `cargo test --manifest-path chunker/Cargo.toml --offline`
+- Rust transcoder changes:
+  - `cargo test --manifest-path transcoder/Cargo.toml --offline`
 - Svelte frontend changes:
   - add and run `npm --prefix frontend run test -- --run` once the frontend test harness is scaffolded
 
@@ -69,7 +71,8 @@ Use a monorepo with clear boundaries:
 
 ```text
 /backend            # Rust API service (upload sessions, metadata, share links, playback metadata)
-/worker             # Rust background processor (ffmpeg pipeline, manifest generation, status transitions)
+/chunker            # Rust processing service that claims baseline jobs and dispatches rendition jobs
+/transcoder         # Rust processing service that builds one configured HLS rendition
 /frontend           # Svelte app (upload page + playback page)
 /docs               # Architecture docs + ADRs + API contracts + operational notes
 /references         # Provided requirement/reference docs
@@ -77,31 +80,31 @@ Use a monorepo with clear boundaries:
 
 Recommended runtime stack:
 - Backend: Rust + Axum + SQLx (or Diesel) + Tokio.
-- Worker: Rust + Tokio + ffmpeg invocation.
+- Chunker: Rust + Tokio + ffprobe invocation.
+- Transcoder: Rust + Tokio + ffmpeg invocation.
 - Frontend: SvelteKit + HTML5 video (HLS.js if needed).
 - Object storage: AWS S3.
-- Metadata DB: Postgres (MVP). The current implementation path uses a Postgres Docker container for both local development and STG-Lite on EC2. Production-like target is managed Postgres (RDS).
+- Metadata DB: Postgres (MVP). The current implementation path uses a Postgres Docker container on the app EC2 host for both local development and STG. Production-like target is managed Postgres (RDS).
 - Async trigger: SQS queue (or S3 event -> webhook endpoint for MVP).
 - CDN: CloudFront in front of S3 for manifests/segments.
 
 STG deployment profile options:
-- `STG-Lite (lowest cost, recommended first)`:
-  - 1 small VM/container host for API + worker.
-  - Frontend can run on the same EC2 host for the take-home, ideally behind the same public ingress layer.
-  - Postgres as a Docker container on the same host (cost-first setup).
+- `STG-Demo (current target)`:
+  - 1 app EC2 host for API + frontend + Postgres container.
+  - 1 chunker EC2 host running Dockerized `chunker` containers from the `chunker/` folder.
+  - 1 transcoder EC2 host running Dockerized `transcoder-*` containers from the `transcoder/` folder.
   - S3 + CloudFront + SQS.
-  - ALB as internet ingress; API Gateway intentionally omitted in STG-Lite to stay within interview budget.
-  - No multi-AZ and minimal autoscaling.
+  - ALB as internet ingress; API Gateway intentionally omitted to stay within interview budget.
+  - Docker Compose under `chunker/` and `transcoder/` simulates autoscaling through per-service scaling.
 - `STG-Prod-Like (higher confidence, higher cost)`:
   - API on ECS/EC2 behind ALB.
   - API Gateway HTTP API in front of ALB.
-  - Worker split into separate services/instance pools:
-    - `Chunker` pool (extracts streamable clips / packaging steps).
-    - `Transcoder` pool (per-rendition jobs such as 360p/720p/1080p).
+  - Chunker split into separate services/instance pools.
+  - Transcoder split into per-rendition services/instance pools.
   - Managed Postgres (RDS), S3, CloudFront, SQS.
   - Optional autoscaling group for API.
 
-STG-Lite database note:
+STG database note:
 - For interview-budget environments, prefer a Postgres container on EC2 with a persistent Docker volume.
 - Local development follows the same shape: Postgres container plus persistent Docker volume.
 - Keep DB private to the host/network; do not expose 5432 publicly.
@@ -126,8 +129,8 @@ docker run -d \
 - Ideal future upgrade path: move to RDS Postgres when higher availability/ops isolation is required.
 
 API Gateway decision note:
-- Current plan intentionally omits API Gateway in STG-Lite for cost control and reduced setup complexity.
-- STG-Lite ingress path is `Client -> ALB -> API service`.
+- Current plan intentionally omits API Gateway in the current STG deployment for cost control and reduced setup complexity.
+- Current STG ingress path is `Client -> ALB -> API service`.
 - Production-like path can be `Client -> API Gateway -> ALB/API service` when budget allows.
 - Benefits of API Gateway (document in final architecture notes):
   - central auth integration points (future auth/JWT/OIDC)
@@ -158,15 +161,19 @@ Core components:
   - Source uploads.
   - Rendition segments.
   - Manifests.
-- `Processing Worker (Rust + ffmpeg)`
-  - Triggered after upload completion.
-  - Baseline rendition first (360p).
-  - Mark streamable when baseline manifest exists.
-  - Continue higher renditions.
+- `Chunker Service (Rust + ffprobe)`
+  - Claims queued baseline jobs after upload completion.
+  - Probes source dimensions.
+  - Dispatches per-rendition transcoding jobs.
+- `Transcoder Service (Rust + ffmpeg)`
+  - One container runs one configured rendition.
+  - Baseline rendition first (`360p`).
+  - Marks streamable only when baseline manifest exists.
+  - Additional rendition containers can scale independently.
 - `Metadata DB`
   - Source of truth for video lifecycle state.
   - State transitions and manifest pointers.
-  - STG-Lite implementation: Postgres container on EC2 host.
+  - Current STG implementation: Postgres container on the app EC2 host.
   - Production-like implementation: RDS Postgres in private subnets.
 - `CDN (CloudFront)`
   - Cache manifests/segments for stream performance and lower egress costs.
@@ -212,18 +219,18 @@ State definitions:
   - Meaning: the original source file exists in object storage, but no streamable rendition is available yet.
   - Playback: not streamable.
   - Typical entry condition: S3 upload completed event or trusted completion flow finalized the source object.
-  - Typical exit: worker claims a baseline processing job and starts generating `360p` HLS output.
+  - Typical exit: chunker claims a baseline processing job and dispatches the `360p` transcoder job.
 - `PROCESSING_BASELINE`
   - Meaning: the system is producing the first low-quality streamable rendition, which is the exam-critical path.
   - Playback: not streamable yet.
-  - Typical entry condition: worker started baseline transcoding and manifest packaging.
+  - Typical entry condition: chunker claimed the baseline job and the baseline transcoder started packaging.
   - Typical exit: baseline playlist, segments, and master manifest entry exist in storage.
 - `BASELINE_READY`
   - Meaning: the first streamable version is available. This is the first success condition for the project.
   - Playback: streamable now.
   - Typical artifact expectation: `360p` HLS output exists and the master manifest points to it.
   - Why this state exists separately: it marks the exact time-to-stream milestone before additional renditions begin.
-  - Typical exit: worker continues with higher renditions and moves to `PROCESSING_FULL`.
+  - Typical exit: additional transcoder containers continue with higher renditions and move the video to `PROCESSING_FULL`.
 - `PROCESSING_FULL`
   - Meaning: the video is already streamable, but higher-quality renditions such as `720p` and `1080p` are still being generated.
   - Playback: still streamable.
@@ -243,10 +250,10 @@ State definitions:
 State transition rules:
 - Do not return `streamable=true` until manifest exists and status is `BASELINE_READY`, `PROCESSING_FULL`, or `READY`.
 - Treat `BASELINE_READY` as the first streamable milestone and the primary exam success condition.
-- Use `PROCESSING_FULL` only after the video is already playable and the worker is continuing enhancement work in the background.
+- Use `PROCESSING_FULL` only after the video is already playable and background transcoders are continuing enhancement work.
 - `READY` means all planned renditions for the current MVP ladder are complete.
 - Transition writes must be atomic and idempotent.
-- Worker should tolerate duplicate events and repeated queue deliveries.
+- Chunker/transcoder containers should tolerate duplicate events and repeated queue deliveries.
 - Shared DB state is the source of truth; never rely on per-instance memory to decide streamability.
 
 ## 7) Data Model (Minimal But Complete)
@@ -472,17 +479,17 @@ API impact note for the expanded ladder:
 3. Backend creates multipart upload in S3 and returns signing data.
 4. Frontend uploads parts directly to S3.
 5. Frontend calls complete endpoint with ETags.
-6. Backend completes multipart, transitions to `UPLOADED`, enqueues worker job.
+6. Backend completes multipart, transitions to `UPLOADED`, and enqueues the parent baseline processing job.
 
 ### 10.2 Processing flow (time-to-stream first)
 
-1. Worker picks baseline job.
-2. ffmpeg transcodes source into 360p segmented HLS (baseline ABR variant) and creates variant playlist.
-3. Upload manifest/segments to S3.
-4. Create/update master manifest with 360p entry only.
-5. DB transition to `BASELINE_READY` and set `is_streamable=true` (this is the streamability gate).
-6. Worker probes the original file dimensions and enqueues only the higher renditions that do not exceed the source resolution.
-7. On completion, update master manifest with higher variants and set `READY`.
+1. Chunker picks the parent baseline job.
+2. Chunker probes the original file dimensions and enqueues the baseline `360p` transcoder job.
+3. The baseline transcoder builds segmented `360p` HLS output and creates the variant playlist.
+4. Upload manifest/segments to S3.
+5. Create/update master manifest with the `360p` entry only.
+6. DB transition to `BASELINE_READY` and set `is_streamable=true` only after the full `360p` VOD artifacts exist.
+7. Later, enqueue and complete higher renditions that do not exceed the source resolution, then update the master manifest and set `READY`.
 
 ### 10.3 Playback flow
 
@@ -525,7 +532,7 @@ UX rules aligned to exam:
 - Prefer concise product language such as `File size limit`, `Accepted files`, `Status`, `Share link`, and `Recent videos`.
 - Hide internal identifiers and infrastructure details unless they are required for a real user task or an explicit admin/debug view.
 
-## 12) Worker/Transcoding + ABR Plan
+## 12) Chunker/Transcoding + ABR Plan
 
 ffmpeg strategy for MVP:
 - Input: source S3 object (download to local temp file).
@@ -550,25 +557,26 @@ No-upscaling rule:
 - Example:
   - a `2160p` source can expose `360p`, `480p`, `720p`, `1080p`, `1440p`, and `2160p`
   - a `1080p` source can expose only `360p`, `480p`, `720p`, and `1080p`
-- Persist `source_width` and `source_height` in `videos` so worker decisions and architecture documentation share the same source of truth.
+- Persist `source_width` and `source_height` in `videos` so chunker/transcoder decisions and architecture documentation share the same source of truth.
 
 Why this matters:
 - ABR is essential for low-bandwidth and device diversity: players can switch rendition without restarting playback.
 - Time-to-stream remains prioritized because 360p is produced first and gates streamability.
 
-Worker execution model:
-- Poll queue (SQS) or DB job table.
-- Lock job atomically (`RUNNING`) to avoid duplicate workers.
+Processing execution model:
+- Chunker polls queue (SQS) or DB job table for parent baseline jobs.
+- Transcoder polls queue (SQS) or DB job table for one configured rendition.
+- Lock job atomically (`RUNNING`) to avoid duplicate claims.
 - Retry transient failures with capped attempts + backoff.
 - Move permanent failures to `FAILED` with error details.
 
 Processing deployment modes:
-- `STG-Lite` (budget): one worker process/instance performs chunking + transcoding stages.
+- `Current STG`: separate app host, chunker host, and transcoder host, with runtime YAML stored inside each service folder.
 - `Scale-out mode` (diagram-aligned): separate chunker and transcoder pools.
   - Ingest queue/event triggers chunker.
   - Chunker emits per-rendition transcode jobs.
-  - Multiple transcoder instances consume jobs in parallel (horizontal scale).
-  - This can be deployed as EC2 instance groups or ECS services.
+  - Multiple transcoder instances consume jobs in parallel.
+  - This can be deployed as EC2 instance groups, ECS services, or Docker Compose service replicas for the take-home demo.
 
 Where horizontal scaling happens for processing:
 - Increase `Chunker` instances when upload completion events back up.
@@ -628,7 +636,7 @@ CDN content and policy:
   - `d38ixt0cyn1hi6.cloudfront.net`
 
 Low-cost STG guidance:
-- Start with `STG-Lite` and scale only after demo stability.
+- Start with the current two-host STG shape and scale replicas only after demo stability.
 - Add billing alarms/budgets on day zero.
 - Keep managed services at smallest tiers; disable idle resources when not testing.
 
@@ -659,7 +667,7 @@ Metrics:
 Alerts:
 - baseline processing latency above threshold
 - queue backlog growth
-- repeated worker failures
+- repeated chunker/transcoder failures
 
 ## 17) Testing Strategy
 
@@ -681,7 +689,7 @@ Current implementation note:
 
 ### 17.2 Integration tests
 - create upload session -> complete multipart -> status changes
-- worker baseline process updates DB + artifacts
+- chunker + transcoder baseline process updates DB + artifacts
 - playback endpoint gates by status correctly
 
 ### 17.3 End-to-end smoke tests
@@ -690,7 +698,7 @@ Current implementation note:
 - concurrent uploads (3-10 files) -> no API starvation
 
 ### 17.4 Failure tests
-- worker crash during transcode -> retry path works
+- transcoder crash during transcode -> retry path works
 - invalid format upload -> fails gracefully
 - incomplete multipart upload -> cleanup/expiry behavior
 
@@ -727,7 +735,7 @@ Day 2:
 - Multipart upload flow end-to-end with S3; shareable link generation.
 
 Day 3:
-- Worker baseline processing (360p HLS) and streamability transition.
+- Chunker + baseline transcoder processing (360p HLS) and streamability transition.
 
 Day 4:
 - Svelte homepage upload flow integrated with backend, plus recent-video frontpage and share-link status page.
@@ -780,20 +788,23 @@ Region baseline:
 | Subnets | Private subnets (2 AZ) |  |  |  | Fill subnet IDs |
 | Security Group | Public ingress SG | `sg-public-entry` |  |  | ALB-facing rules |
 | Security Group | API SG | `sg-api` |  |  | App port from `sg-public-entry` only |
-| Security Group | Worker SG | `sg-worker` |  |  | No public inbound |
-| Security Group | DB SG | `sg-db` |  |  | 5432 only from `sg-api`/`sg-worker` |
+| Security Group | Processing SG | `sg-processing` |  |  | No public inbound |
+| Security Group | DB SG | `sg-db` |  |  | 5432 only from `sg-api`/`sg-processing` |
 | Security Group | Admin SSH SG | `sg-admin-ssh` |  |  | SSH from your IP only |
-| EC2 Instance | Primary app/worker host |  |  |  | Fill instance ID, private/public IP |
-| EC2 Instance | Chunker host/service (if separate) |  |  |  | Fill if provisioned separately |
-| EC2 Instance | Transcoder host/service (if separate) |  |  |  | Fill if provisioned separately |
-| IAM Role | EC2 app/worker role |  |  |  | Fill role name/ARN |
+| EC2 Instance | Primary app host |  |  |  | Fill instance ID, private/public IP |
+| EC2 Instance | Chunker host |  |  |  | Fill instance ID, private/public IP |
+| EC2 Instance | Transcoder host |  |  |  | Fill instance ID, private/public IP |
+| IAM Role | EC2 app host role |  |  |  | Fill role name/ARN |
+| IAM Role | EC2 chunker host role |  |  |  | Fill role name/ARN |
+| IAM Role | EC2 transcoder host role |  |  |  | Fill role name/ARN |
 
-### 20A.2 Runtime Config Values (For App/Worker Integration)
+### 20A.2 Runtime Config Values (For App/Processing Integration)
 
 | Config Key | Current Value | Notes |
 |---|---|---|
 | `STG_ALB_DNS` | `stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com` | App/API temporary public endpoint |
 | `CDN_BASE_URL` | `https://d38ixt0cyn1hi6.cloudfront.net` | Build `manifestCdnUrl` from this |
+| `PROCESSED_ASSET_BASE_URL` | `https://d38ixt0cyn1hi6.cloudfront.net` | Optional explicit playback-asset base URL; backend falls back to `CDN_BASE_URL` |
 | `AWS_REGION` | `ap-northeast-1` | |
 | `UPLOAD_BUCKET` | `stg-video-upload-1a` | |
 | `PROCESSED_BUCKET` | `stg-video-processed-1a` | |
@@ -802,8 +813,8 @@ Region baseline:
 | `STG_POSTGRES_DB` | `vid-archi-db` | Container bootstrap DB name |
 | `STG_POSTGRES_USER` | `video-db-access` | Container bootstrap DB user |
 | `STG_POSTGRES_PASSWORD` | `video-db-password` | Container bootstrap DB password |
-| `STG_POSTGRES_BIND_ADDRESS` | `10.0.2.16` | Primary EC2 private IP; publish Postgres here for worker access |
-| `DATABASE_URL` | `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` | Use as `STG_DATABASE_URL`; primary app host private IP because worker runs on a separate EC2 instance |
+| `STG_POSTGRES_BIND_ADDRESS` | `10.0.2.16` | Primary app EC2 private IP; publish Postgres here for chunker/transcoder host access |
+| `DATABASE_URL` | `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` | Use as `STG_DATABASE_URL`; primary app host private IP because chunker/transcoder run on a separate EC2 instance |
 
 ### 20A.3 Missing AWS Inventory Values To Collect
 
@@ -822,27 +833,34 @@ Still missing from the current STG inventory:
 - Security groups:
   - `sg-public-entry` actual SG ID
   - `sg-api` actual SG ID
-  - `sg-worker` actual SG ID
+  - `sg-processing` actual SG ID
   - `sg-db` actual SG ID
   - `sg-admin-ssh` actual SG ID
 - Compute:
   - primary EC2 instance ID
   - primary EC2 public IP
-  - worker EC2 instance ID
-  - worker EC2 private IP
-  - worker EC2 public IP if assigned
+  - chunker EC2 instance ID
+  - chunker EC2 private IP
+  - chunker EC2 public IP if assigned
+  - transcoder EC2 instance ID
+  - transcoder EC2 private IP
+  - transcoder EC2 public IP if assigned
 - IAM:
-  - EC2 app/worker role name
-  - EC2 app/worker role ARN
+  - EC2 app host role name
+  - EC2 app host role ARN
+  - EC2 chunker host role name
+  - EC2 chunker host role ARN
+  - EC2 transcoder host role name
+  - EC2 transcoder host role ARN
 - Runtime config values:
-  - none remaining for app/worker DB connectivity; current STG DB URL is known
+  - none remaining for app/processing DB connectivity; current STG DB URL is known
 
 STG database access note:
-- If backend and worker processes run on the same primary EC2 host as the Postgres container, use `127.0.0.1:5432` in the STG DB URL.
-- If chunker/transcoder later run on separate EC2 instances, the Postgres container must listen on the primary host private interface and only allow VPC-private access from the API/worker security groups.
+- If backend and processing containers run on the same primary EC2 host as the Postgres container, use `127.0.0.1:5432` in the STG DB URL.
+- If chunker/transcoder run on a separate EC2 instance, the Postgres container must listen on the primary host private interface and only allow VPC-private access from the API/processing security groups.
 - In that split-host case, use the primary EC2 private IP or private DNS name in `STG_DATABASE_URL`, not `localhost`.
-- Current confirmed STG shape: backend/API runs on the primary EC2 host with Postgres, while chunker/transcoder containers run on a separate worker EC2 instance. Use `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` as the STG DB URL.
-- Deployment implication: the STG Postgres container can no longer bind only to `127.0.0.1`; it must listen on the primary host private interface so the worker EC2 instance can connect over the VPC.
+- Current confirmed STG shape: backend/API runs on the primary EC2 host with Postgres, while chunker and transcoder run on separate EC2 instances. Use `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` as the STG DB URL.
+- Deployment implication: the STG Postgres container can no longer bind only to `127.0.0.1`; it must listen on the primary host private interface so the chunker and transcoder EC2 instances can connect over the VPC.
 - STG deploy-script rule: when bootstrapping the Postgres container, initialize it with `STG_POSTGRES_DB`, `STG_POSTGRES_USER`, and `STG_POSTGRES_PASSWORD`, publish `5432` on `STG_POSTGRES_BIND_ADDRESS`, and run Postgres with `listen_addresses='*'`.
 
 ## 21) Ordered What-To-Do-Next Checklist
@@ -850,44 +868,52 @@ STG database access note:
 This list is intentionally execution-ordered; completing all items should produce a functioning exam-compliant project.
 Checked items (`[x]`) are done items.
 
-- [x] 1a. Create monorepo folders (`backend`, `worker`, `frontend`, `docs`) and base READMEs.
+- [x] 1a. Create monorepo folders (`backend`, `chunker`, `transcoder`, `frontend`, `docs`) and base READMEs.
 - [x] 1b. Add local dev config (`.env.example`, docker-compose for Postgres/local S3 emulator if used).
 - [x] 1c. Define shared constants (max upload size 1GB, allowed MIME types, baseline rendition profile).
 - [x] 1d. Create shell scripts for local run and STG deployment handoff for backend/frontend services as they become runnable.
-- [x] 1e. Create STG-Lite orchestration scripts for frontend + backend + Postgres container deployment on the primary EC2 host.
+- [x] 1e. Create app-host, chunker-host, and transcoder-host deployment/start scripts for the split EC2 topology.
 
 Current script scope:
-- STG-Lite deployment scripts should package backend/frontend artifacts and start the packaged services by default.
+- Host-specific deployment scripts should package artifacts and start services by default.
 - Database bootstrap and schema migration execution must be explicit flags, not default deploy behavior.
 - First-time DB setup should use `--bootstrap-db`.
 - Full database reset should use `--reset-db` and must remain an explicit destructive action.
 - Later schema changes should use `--migrate-db`.
 - Local packaged-service scripts should wrap the same flow with local defaults, including MinIO startup and `.env.local` as the default env file.
-- The single preferred local command is `./scripts/local/deploy-local-lite.sh`; older split local infra scripts should be removed once the packaged local path exists.
+- The single preferred local command remains `./scripts/local/deploy-local-lite.sh`; for real STG deployment, run app-host, chunker-host, and transcoder-host scripts on their respective EC2 instances.
 
 First-time deployment commands:
 - Local:
   - `./scripts/local/deploy-local-lite.sh --bootstrap-db`
-- STG:
-  - `./scripts/stg/deploy-stg-lite.sh --bootstrap-db`
+- STG app host:
+  - `./scripts/stg/deploy-stg-app-host.sh --bootstrap-db`
+- STG chunker host:
+  - `./scripts/stg/deploy-stg-chunker-host.sh`
+- STG transcoder host:
+  - `./scripts/stg/deploy-stg-transcoder-host.sh`
 
 Normal redeploy commands:
 - Local:
   - `./scripts/local/deploy-local-lite.sh`
-- STG:
-  - `./scripts/stg/deploy-stg-lite.sh`
+- STG app host:
+  - `./scripts/stg/deploy-stg-app-host.sh`
+- STG chunker host:
+  - `./scripts/stg/deploy-stg-chunker-host.sh`
+- STG transcoder host:
+  - `./scripts/stg/deploy-stg-transcoder-host.sh`
 
 Schema migration commands after first deploy:
 - Local:
   - `./scripts/local/deploy-local-lite.sh --migrate-db`
-- STG:
-  - `./scripts/stg/deploy-stg-lite.sh --migrate-db`
+- STG app host:
+  - `./scripts/stg/deploy-stg-app-host.sh --migrate-db`
 
 Destructive DB reset commands:
 - Local:
   - `./scripts/local/deploy-local-lite.sh --reset-db`
-- STG:
-  - `./scripts/stg/deploy-stg-lite.sh --reset-db`
+- STG app host:
+  - `./scripts/stg/deploy-stg-app-host.sh --reset-db`
 
 - [x] 2. Implement DB schema + migrations for `videos`, `upload_sessions`, `upload_parts`, `video_renditions`, `processing_jobs`.
 
@@ -904,10 +930,20 @@ Implementation note for `4a/4b/4c`:
 - The homepage feed now defaults to 10 videos per page and supports previous/next pagination.
 - Supporting backend read endpoints added: `GET /api/videos?page=1&pageSize=10` and `GET /api/videos/{publicId}`.
 
-- [ ] 5a. Build worker job pickup logic and status transition guardrails.
-- [ ] 5b. Implement baseline transcoding pipeline (360p HLS segments + 360p variant playlist).
-- [ ] 5c. Generate/update master manifest with baseline entry and upload artifacts to S3.
-- [ ] 5d. Set status `BASELINE_READY` only when baseline manifest + segments are available.
+- [x] 5a. Build chunker/transcoder job pickup logic and status transition guardrails.
+- [x] 5b. Implement baseline transcoding pipeline (360p HLS segments + 360p variant playlist).
+- [x] 5c. Generate/update master manifest with baseline entry and upload artifacts to S3.
+- [x] 5d. Set status `BASELINE_READY` only when baseline manifest + segments are available.
+
+Implementation note for `5a/5b/5c/5d`:
+- `chunker/` now contains the Rust service that claims parent `BASELINE` jobs and dispatches child rendition jobs.
+- `transcoder/` now contains the Rust service that processes one configured rendition per container.
+- Current executable shape uses a separate processing EC2 host plus Docker Compose services: `chunker` and `transcoder-<resolution>`.
+- The chunker polls `processing_jobs`, claims a queued `BASELINE` job atomically, moves the video from `UPLOADED` to `PROCESSING_BASELINE`, downloads the source object, persists source dimensions via `ffprobe`, and inserts the baseline `360p` child job into `transcoding_jobs`.
+- The baseline transcoder downloads `videos/{video_id}/source/original`, generates `360p` HLS artifacts via `ffmpeg`, writes `videos/{video_id}/hls/master.m3u8`, and uploads artifacts to the processed bucket.
+- `BASELINE_READY` is written only after the transcoder has finished the full `360p` VOD package, uploaded the baseline playlist, uploaded the master manifest, uploaded all baseline segments, and persisted `manifest_s3_key`.
+- `GET /api/videos/{publicId}` now exposes `manifestUrl` from shared metadata using `PROCESSED_ASSET_BASE_URL` or `CDN_BASE_URL`.
+- The runtime assets now live inside `chunker/` and `transcoder/` so each service folder can be transferred to its own EC2 instance. Scale `chunker` replicas for dispatch pressure and scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently for rendition-specific load.
 
 - [ ] 6a. Implement playback metadata endpoint (`GET /api/videos/{publicId}/playback`).
 - [ ] 6b. Build frontend playback page (`/v/[publicId]`) with status polling.
@@ -919,24 +955,24 @@ Implementation note for `4a/4b/4c`:
 - [ ] 7c. Persist rendition metadata in `video_renditions`.
 - [ ] 7d. Configure CDN cache behavior for manifests and segments; validate first-play path via CloudFront URLs.
 
-- [ ] 8a. Add idempotent retry policy for worker failures.
+- [ ] 8a. Add idempotent retry policy for chunker/transcoder failures.
 - [ ] 8b. Add terminal failure handling (`FAILED` state, error message surfaces in UI/API).
 - [ ] 8c. Add abandoned multipart cleanup path (scheduled task or lifecycle policy docs + config).
 
-- [ ] 9a. Add structured logging and correlation IDs across API and worker.
+- [ ] 9a. Add structured logging and correlation IDs across API and processing services.
 - [ ] 9b. Add metrics for time-to-stream, queue depth, processing success/failure.
-- [ ] 9c. Add health/readiness endpoints for API and worker process.
+- [ ] 9c. Add health/readiness endpoints for API, chunker, and transcoder.
 
 - [ ] 10a. Add integration tests for upload->process->playback happy path.
 - [ ] 10b. Add concurrency test for multiple simultaneous uploads.
-- [ ] 10c. Add failure-path tests (bad format, worker retry, incomplete upload).
+- [ ] 10c. Add failure-path tests (bad format, transcoder retry, incomplete upload).
 
 - [ ] 11a. Write `docs/architecture.md` with component and sequence diagrams.
 - [ ] 11b. Write `docs/api.md` and include request/response examples.
 - [ ] 11c. Write `docs/operational-costs.md` with S3/CDN/lifecycle decisions and tradeoffs.
 - [ ] 11d. Add explicit citations to files under `references/` for requirement traceability.
 - [ ] 11e. Document STG deployment topology, resource list, and monthly cost guardrails.
-- [ ] 11f. Add ADR/note: API Gateway omitted in STG-Lite for cost; include benefits and upgrade path to production-like ingress.
+- [ ] 11f. Add ADR/note: API Gateway omitted in current STG for cost; include benefits and upgrade path to production-like ingress.
 
 - [ ] 12a. Run final end-to-end demo scenario and capture expected outputs.
 - [ ] 12b. Verify the requirement checklist in Section 3 item-by-item.
@@ -951,33 +987,33 @@ Checked items (`[x]`) are done items.
 - [ ] 0c. Create STG networking baseline (complete all `0c.x` items below).
 - [x] 0c.1 Create 1 VPC for STG (example CIDR: `10.0.0.0/16`).
 - [x] 0c.2 Create 2 public subnets (different AZs) for internet-facing ingress.
-- [x] 0c.3 Create 2 private subnets (different AZs) for API app, worker, and DB.
+- [x] 0c.3 Create 2 private subnets (different AZs) for API app, processing, and DB.
 - [x] 0c.4 Attach Internet Gateway to VPC and create public route table: `0.0.0.0/0 -> IGW`.
 - [x] 0c.5 Associate public subnets to public route table; associate private subnets to private route table.
 - [ ] 0c.6 Ensure only ingress layer is public:
 - [ ] 0c.6a Public path components: `CloudFront` + (`API Gateway` and/or `ALB`).
-- [ ] 0c.6b Private components: API service tasks/instances, worker, Postgres, internal queues.
+- [ ] 0c.6b Private components: API service tasks/instances, chunker/transcoder containers, Postgres, internal queues.
 - [x] 0c.7 Create security groups with least privilege:
 - [x] 0c.7a `sg-public-entry`: inbound `443` from `0.0.0.0/0` (and optional `80` redirect).
 - [x] 0c.7b `sg-api`: inbound app port only from `sg-public-entry`.
-- [x] 0c.7c `sg-worker`: no inbound from internet.
-- [x] 0c.7d `sg-db`: inbound `5432` only from `sg-api` and `sg-worker`.
+- [x] 0c.7c `sg-processing`: no inbound from internet.
+- [x] 0c.7d `sg-db`: inbound `5432` only from `sg-api` and `sg-processing`.
 - [ ] 0c.8 Set public accessibility rules for review:
 - [ ] 0c.8a Public: website domain, upload/status/playback API routes, CloudFront video paths (`*.m3u8`, `*.ts`/`*.m4s`).
-- [ ] 0c.8b Private: DB endpoints, worker endpoints, S3 buckets (no public bucket/object access).
+- [ ] 0c.8b Private: DB endpoints, processing endpoints, S3 buckets (no public bucket/object access).
 - [x] 0c.8c If company provides fixed egress CIDRs, add optional IP allowlist via WAF for review paths.
 - [ ] 0c.9 Validate networking before app deploy:
 - [ ] 0c.9a Confirm public URL reachability from external network.
 - [ ] 0c.9b Confirm private resources are unreachable from internet.
-- [ ] 0c.9c Confirm API can reach DB and worker can reach S3/SQS.
+- [ ] 0c.9c Confirm API can reach DB and processing containers can reach S3/SQS.
 - [x] 0d. Provision storage and queue primitives (S3 upload bucket, S3 processed bucket, SQS queue, optional DLQ).
 - [x] 0e. Provision compute + database for STG:
-  - `STG-Lite`: single API/worker host + Postgres container (cost-first).
-  - `STG-Prod-Like`: API service + worker service + managed Postgres (RDS).
-- [x] 0e.1 Launch primary STG EC2 instance for app services (API + worker).
+  - `Current STG`: app host + chunker host + transcoder host + Postgres container on app host.
+  - `STG-Prod-Like`: API service + processing services + managed Postgres (RDS).
+- [x] 0e.1 Launch primary STG EC2 instance for app services (API + frontend + Postgres container).
 - [x] 0e.2 Install Docker and run Postgres container on EC2 (`postgres:16`) with persistent volume.
 - [x] 0e.3 Keep Postgres access private (bind `127.0.0.1:5432` or private subnet only).
-- [ ] 0e.4 Configure API/worker env vars to use containerized Postgres connection string.
+- [ ] 0e.4 Configure app-host and processing-host env vars to use the shared Postgres connection string.
 - [ ] 0e.5 Document DB backup/recovery plan for containerized Postgres (`pg_dump` + restore workflow, optional EBS snapshots).
 - [ ] 0e.6 Document that RDS Postgres is the production-like replacement when budget/ops requirements increase.
 - [x] 0e.7 (Scale-out option) Provision separate compute for processing pools:

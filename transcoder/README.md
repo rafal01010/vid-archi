@@ -1,0 +1,25 @@
+# Transcoder
+
+This crate is the second processing stage for the split media pipeline.
+
+Responsibilities:
+- claim queued rows from `transcoding_jobs`
+- run only for one configured `TRANSCODER_RENDITION`
+- download the source object
+- build HLS artifacts for that rendition with `ffmpeg`
+- upload playlists and segments to the processed bucket
+- mark baseline streamability when the `360p` rendition finishes
+
+Container model:
+- one Docker service definition exists per rendition
+- you can scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently
+- that is how the project simulates autoscaling pressure by resolution
+
+Useful commands:
+
+```bash
+cargo test --manifest-path transcoder/Cargo.toml --offline
+./transcoder/scripts/deploy-transcoder.sh --run-tests
+./transcoder/scripts/run-stg-transcoder.sh --env-file .env.local --rendition 360p
+docker compose -f transcoder/docker-compose.yml up -d transcoder-360p transcoder-480p transcoder-720p transcoder-1080p transcoder-1440p transcoder-2160p
+```

@@ -58,20 +58,26 @@ fi
 echo "Starting MinIO services for local object storage"
 docker compose up -d minio minio-bootstrap
 
-DEPLOY_ARGS=(--env-file "${ENV_FILE}")
+APP_DEPLOY_ARGS=(--env-file "${ENV_FILE}")
+CHUNKER_DEPLOY_ARGS=(--env-file "${ENV_FILE}")
+TRANSCODER_DEPLOY_ARGS=(--env-file "${ENV_FILE}")
 
 if [[ "${RUN_CHECKS}" == "1" ]]; then
-  DEPLOY_ARGS+=(--run-checks)
+  APP_DEPLOY_ARGS+=(--run-checks)
+  CHUNKER_DEPLOY_ARGS+=(--run-checks)
+  TRANSCODER_DEPLOY_ARGS+=(--run-checks)
 fi
 
 if [[ "${BOOTSTRAP_DB}" == "1" ]]; then
-  DEPLOY_ARGS+=(--bootstrap-db)
+  APP_DEPLOY_ARGS+=(--bootstrap-db)
 elif [[ "${RUN_DB_MIGRATIONS}" == "1" ]]; then
-  DEPLOY_ARGS+=(--migrate-db)
+  APP_DEPLOY_ARGS+=(--migrate-db)
 fi
 
 if [[ "${RESET_DB}" == "1" ]]; then
-  DEPLOY_ARGS+=(--reset-db)
+  APP_DEPLOY_ARGS+=(--reset-db)
 fi
 
-"${REPO_ROOT}/scripts/stg/deploy-stg-lite.sh" "${DEPLOY_ARGS[@]}"
+"${REPO_ROOT}/scripts/stg/deploy-stg-app-host.sh" "${APP_DEPLOY_ARGS[@]}"
+"${REPO_ROOT}/scripts/stg/deploy-stg-chunker-host.sh" "${CHUNKER_DEPLOY_ARGS[@]}"
+"${REPO_ROOT}/scripts/stg/deploy-stg-transcoder-host.sh" "${TRANSCODER_DEPLOY_ARGS[@]}"

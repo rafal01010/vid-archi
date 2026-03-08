@@ -1,0 +1,20 @@
+services:
+  chunker:
+    image: ${CHUNKER_IMAGE:-vid-archi-chunker:stg}
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV}
+      AWS_REGION: ${AWS_REGION}
+      DATABASE_URL: ${STG_DATABASE_URL}
+      STG_DATABASE_URL: ${STG_DATABASE_URL}
+      VIDEO_POLICY_FILE: /app/config/video_policy.json
+      UPLOAD_BUCKET: ${UPLOAD_BUCKET}
+      LOCAL_UPLOAD_BUCKET: ${LOCAL_UPLOAD_BUCKET:-}
+      LOCAL_S3_ENDPOINT: ${LOCAL_S3_ENDPOINT:-}
+      AWS_S3_ENDPOINT: ${AWS_S3_ENDPOINT:-}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      CHUNKER_POLL_INTERVAL_SECONDS: ${CHUNKER_POLL_INTERVAL_SECONDS:-5}
+      CHUNKER_TEMP_DIR: /tmp/vid-archi-chunker
+    tmpfs:
+      - /tmp

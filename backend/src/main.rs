@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         repository.clone(),
         object_storage,
     );
-    let video_query_service = VideoQueryService::new(repository);
+    let video_query_service = VideoQueryService::new(config.clone(), repository);
 
     let state = AppState::new(config.clone(), upload_service, video_query_service);
     let router = build_router(state);

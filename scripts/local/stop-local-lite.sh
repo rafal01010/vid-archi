@@ -30,6 +30,8 @@ fi
 BACKEND_PID_FILE="${REPO_ROOT}/logs/backend.pid"
 FRONTEND_PID_FILE="${REPO_ROOT}/logs/frontend.pid"
 POSTGRES_CONTAINER_NAME="${STG_POSTGRES_CONTAINER_NAME:-local-lite-postgres}"
+CHUNKER_COMPOSE_FILE="${REPO_ROOT}/chunker/docker-compose.yml"
+TRANSCODER_COMPOSE_FILE="${REPO_ROOT}/transcoder/docker-compose.yml"
 
 stop_pid_file() {
   local pid_file="$1"
@@ -53,6 +55,12 @@ stop_pid_file "${BACKEND_PID_FILE}"
 stop_pid_file "${FRONTEND_PID_FILE}"
 
 if command -v docker >/dev/null 2>&1; then
+  echo "Stopping local chunker containers"
+  docker compose --env-file "${ENV_FILE}" -f "${CHUNKER_COMPOSE_FILE}" down >/dev/null 2>&1 || true
+
+  echo "Stopping local transcoder containers"
+  docker compose --env-file "${ENV_FILE}" -f "${TRANSCODER_COMPOSE_FILE}" down >/dev/null 2>&1 || true
+
   echo "Stopping local MinIO services"
   docker compose stop minio minio-bootstrap >/dev/null 2>&1 || true
 
