@@ -1,6 +1,6 @@
-use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -52,11 +52,9 @@ impl IntoResponse for AppError {
             AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, "bad_request", message),
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
             AppError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
-            AppError::Internal(message) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                message,
-            ),
+            AppError::Internal(message) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+            }
             AppError::Database(error) => {
                 tracing::error!(error = %error, "database error");
                 (

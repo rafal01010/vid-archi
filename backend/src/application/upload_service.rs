@@ -60,7 +60,8 @@ impl UploadService {
             .await?;
         let upload_session_id = Uuid::new_v4();
         let source_object_key = format!("videos/{video_id}/source/original");
-        let upload_expires_at = Utc::now() + Duration::seconds(self.config.upload_session_ttl_seconds);
+        let upload_expires_at =
+            Utc::now() + Duration::seconds(self.config.upload_session_ttl_seconds);
 
         let s3_upload_id = match self
             .object_storage
@@ -186,7 +187,9 @@ impl UploadService {
                 .repository
                 .get_finalized_upload(video_id)
                 .await?
-                .ok_or_else(|| AppError::internal("missing finalized upload after completed session"))?;
+                .ok_or_else(|| {
+                    AppError::internal("missing finalized upload after completed session")
+                })?;
 
             return Ok(map_finalized_upload(finalized_upload));
         }
@@ -342,9 +345,9 @@ fn sanitize_filename(filename: &str) -> AppResult<String> {
         return Err(AppError::bad_request("filename is required"));
     }
 
-    let sanitized_filename = std::path::Path::new(trimmed_filename)
-        .file_name()
-        .and_then(|value| value.to_str())
+    let sanitized_filename = trimmed_filename
+        .rsplit(['/', '\\'])
+        .next()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::bad_request("filename must contain a valid file name"))?;
@@ -365,15 +368,22 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 
 fn normalize_part_numbers(part_numbers: Vec<i32>) -> AppResult<Vec<i32>> {
     if part_numbers.is_empty() {
-        return Err(AppError::bad_request("at least one part number is required"));
+        return Err(AppError::bad_request(
+            "at least one part number is required",
+        ));
     }
 
     let mut normalized_part_numbers = part_numbers;
     normalized_part_numbers.sort_unstable();
     normalized_part_numbers.dedup();
 
-    if normalized_part_numbers.iter().any(|part_number| *part_number <= 0) {
-        return Err(AppError::bad_request("part numbers must be positive integers"));
+    if normalized_part_numbers
+        .iter()
+        .any(|part_number| *part_number <= 0)
+    {
+        return Err(AppError::bad_request(
+            "part numbers must be positive integers",
+        ));
     }
 
     Ok(normalized_part_numbers)
@@ -383,7 +393,9 @@ fn normalize_completed_parts(
     parts: Vec<CompletedUploadPartInput>,
 ) -> AppResult<Vec<CompletedUploadPart>> {
     if parts.is_empty() {
-        return Err(AppError::bad_request("at least one completed part is required"));
+        return Err(AppError::bad_request(
+            "at least one completed part is required",
+        ));
     }
 
     let mut normalized_parts = parts
@@ -414,7 +426,9 @@ fn normalize_completed_parts(
         .windows(2)
         .any(|window| window[0].part_number == window[1].part_number)
     {
-        return Err(AppError::bad_request("duplicate part numbers are not allowed"));
+        return Err(AppError::bad_request(
+            "duplicate part numbers are not allowed",
+        ));
     }
 
     Ok(normalized_parts)
@@ -427,7 +441,10 @@ fn validate_part_window(
     let max_part_count = ((upload_session.size_bytes + upload_session.part_size_bytes - 1)
         / upload_session.part_size_bytes) as i32;
 
-    if part_numbers.iter().any(|part_number| *part_number > max_part_count) {
+    if part_numbers
+        .iter()
+        .any(|part_number| *part_number > max_part_count)
+    {
         return Err(AppError::bad_request(
             "requested part number exceeds the expected multipart window",
         ));
@@ -452,8 +469,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CompletedUploadPartInput, normalize_completed_parts, normalize_optional_text,
-        normalize_part_numbers, sanitize_filename, validate_part_window,
+        normalize_completed_parts, normalize_optional_text, normalize_part_numbers,
+        sanitize_filename, validate_part_window, CompletedUploadPartInput,
     };
     use crate::infrastructure::postgres::UploadSessionContext;
 

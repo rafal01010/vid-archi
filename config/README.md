@@ -9,3 +9,4 @@ Use this file for:
 - upload validation limits
 - allowed input MIME types and extensions
 - baseline rendition settings that affect upload, processing, playback, and documentation
+- adaptive rendition ladder settings and the no-upscaling rule

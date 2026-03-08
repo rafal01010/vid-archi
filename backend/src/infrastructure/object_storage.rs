@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use aws_config::BehaviorVersion;
-use aws_credential_types::Credentials;
 use aws_credential_types::provider::SharedCredentialsProvider;
-use aws_sdk_s3::Client;
+use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::Client;
 use uuid::Uuid;
 
 use crate::http::error::{AppError, AppResult};
@@ -27,13 +27,8 @@ impl ObjectStorage {
             config.s3_access_key_id.clone(),
             config.s3_secret_access_key.clone(),
         ) {
-            let credentials = Credentials::new(
-                access_key_id,
-                secret_access_key,
-                None,
-                None,
-                "local-minio",
-            );
+            let credentials =
+                Credentials::new(access_key_id, secret_access_key, None, None, "local-minio");
 
             aws_config::defaults(BehaviorVersion::latest())
                 .region(region.clone())
@@ -93,11 +88,7 @@ impl ObjectStorage {
         })
     }
 
-    pub async fn abort_multipart_upload(
-        &self,
-        object_key: &str,
-        upload_id: &str,
-    ) -> AppResult<()> {
+    pub async fn abort_multipart_upload(&self, object_key: &str, upload_id: &str) -> AppResult<()> {
         self.client
             .abort_multipart_upload()
             .bucket(&self.upload_bucket)

@@ -4,6 +4,8 @@ This directory now contains the Rust API service responsible for:
 - creating video records and upload sessions
 - issuing presigned multipart upload instructions
 - generating deterministic public share links
+- listing recent videos for the homepage
+- resolving public share IDs for the share page
 - queuing the baseline processing job after upload completion
 
 Current internal layout:
@@ -27,6 +29,10 @@ Implementation rules:
 
 - `POST /api/videos`
   Creates the `videos` row, creates the `upload_sessions` row, starts the S3 multipart upload, and returns the session metadata the frontend needs.
+- `GET /api/videos`
+  Returns the recent-video homepage library ordered by newest upload first, with pagination metadata.
+- `GET /api/videos/{publicId}`
+  Resolves the public share ID and returns the current lifecycle state and route metadata for the share page.
 - `POST /api/videos/{videoId}/parts/sign`
   Returns presigned `PUT` URLs for explicit multipart part numbers.
 - `POST /api/videos/{videoId}/complete`
@@ -38,16 +44,15 @@ Implementation rules:
 
 Prerequisites:
 - Rust toolchain installed locally (`cargo` must exist)
-- local infra started with `./scripts/local/start-infra.sh`
-- migrations applied with `./scripts/local/db-migrate.sh`
+- packaged local stack started with `./scripts/local/deploy-local-lite.sh`
 
-Run the API:
+Preferred local command:
 
 ```bash
-./backend/scripts/run-local-api.sh
+./scripts/local/deploy-local-lite.sh --bootstrap-db
 ```
 
-The service loads `.env`, reads the shared upload policy from `VIDEO_POLICY_FILE`, connects to Postgres via `DATABASE_URL`, and targets MinIO automatically when `LOCAL_S3_ENDPOINT` is set.
+The first-time deploy wrapper starts MinIO, provisions the local packaged Postgres container, applies pending migrations, packages the backend and frontend, and launches the services in the background. Later redeploys should use `./scripts/local/deploy-local-lite.sh` without `--bootstrap-db`. The API then loads `.env.local`, reads the shared upload policy from `VIDEO_POLICY_FILE`, connects to Postgres via `STG_DATABASE_URL`, and targets MinIO automatically when `LOCAL_S3_ENDPOINT` is set.
 
 ## Testing
 
@@ -91,3 +96,19 @@ This is aligned with normal CI/CD practice:
 - asks S3 to stitch the uploaded parts into the source object
 - updates the database state to `UPLOADED`
 - inserts the initial `BASELINE` processing job that the worker will pick up in step `5`
+
+`GET /api/videos`:
+- uses `created_at DESC` so the homepage shows the latest uploaded videos first
+- defaults cleanly to page `1` and page size `10`
+- returns `page`, `pageSize`, `totalCount`, `totalPages`, `hasPreviousPage`, and `hasNextPage`
+- returns only metadata and route info, never the video bytes themselves
+
+`GET /api/videos/{publicId}`:
+- treats the public share ID as the stable lookup key for the share page
+- returns lifecycle state immediately, even before streaming playback is implemented
+- leaves `manifestUrl` empty until the worker and playback steps publish streamable artifacts
+
+Resolution-ladder note:
+- the shared policy now defines `360p`, `480p`, `720p`, `1080p`, `1440p`, and `2160p`
+- no upload API change is required for this
+- the worker should persist source dimensions and only generate renditions at or below the original resolution

@@ -10,8 +10,8 @@ use std::net::SocketAddr;
 use dotenvy::dotenv;
 use tracing_subscriber::EnvFilter;
 
-use crate::app::{AppState, build_router};
-use crate::application::UploadService;
+use crate::app::{build_router, AppState};
+use crate::application::{UploadService, VideoQueryService};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::AppConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
@@ -26,9 +26,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let policy = VideoPolicy::load(&config.video_policy_file).await?;
     let repository = VideoRepository::connect(&config.database_url).await?;
     let object_storage = ObjectStorage::new(&config).await?;
-    let upload_service = UploadService::new(config.clone(), policy.clone(), repository, object_storage);
+    let upload_service = UploadService::new(
+        config.clone(),
+        policy.clone(),
+        repository.clone(),
+        object_storage,
+    );
+    let video_query_service = VideoQueryService::new(repository);
 
-    let state = AppState::new(config.clone(), upload_service);
+    let state = AppState::new(config.clone(), upload_service, video_query_service);
     let router = build_router(state);
     let address = SocketAddr::from(([0, 0, 0, 0], config.api_port));
 

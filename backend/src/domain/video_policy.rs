@@ -13,18 +13,17 @@ pub struct VideoPolicy {
     pub allowed_input_mime_types: Vec<String>,
     pub allowed_input_extensions: Vec<String>,
     pub baseline_rendition_profile: BaselineRenditionProfile,
+    pub adaptive_rendition_ladder: Vec<AdaptiveRenditionProfile>,
 }
 
 impl VideoPolicy {
     pub async fn load(path: &Path) -> AppResult<Self> {
-        let contents = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|error| {
-                AppError::internal_with_context(
-                    "failed to read the video policy file",
-                    format!("path={} error={error}", path.display()),
-                )
-            })?;
+        let contents = tokio::fs::read_to_string(path).await.map_err(|error| {
+            AppError::internal_with_context(
+                "failed to read the video policy file",
+                format!("path={} error={error}", path.display()),
+            )
+        })?;
 
         serde_json::from_str(&contents).map_err(|error| {
             AppError::internal_with_context(
@@ -101,9 +100,20 @@ pub struct BaselineRenditionProfile {
     pub variant_playlist_file_name: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptiveRenditionProfile {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub video_bitrate_kbps: u32,
+    pub audio_bitrate_kbps: u32,
+    pub variant_playlist_file_name: String,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BaselineRenditionProfile, VideoPolicy};
+    use super::{AdaptiveRenditionProfile, BaselineRenditionProfile, VideoPolicy};
 
     fn sample_policy() -> VideoPolicy {
         VideoPolicy {
@@ -135,6 +145,32 @@ mod tests {
                 master_playlist_file_name: "master.m3u8".to_owned(),
                 variant_playlist_file_name: "360p.m3u8".to_owned(),
             },
+            adaptive_rendition_ladder: vec![
+                AdaptiveRenditionProfile {
+                    name: "360p".to_owned(),
+                    width: 640,
+                    height: 360,
+                    video_bitrate_kbps: 800,
+                    audio_bitrate_kbps: 128,
+                    variant_playlist_file_name: "360p.m3u8".to_owned(),
+                },
+                AdaptiveRenditionProfile {
+                    name: "480p".to_owned(),
+                    width: 854,
+                    height: 480,
+                    video_bitrate_kbps: 1400,
+                    audio_bitrate_kbps: 128,
+                    variant_playlist_file_name: "480p.m3u8".to_owned(),
+                },
+                AdaptiveRenditionProfile {
+                    name: "720p".to_owned(),
+                    width: 1280,
+                    height: 720,
+                    video_bitrate_kbps: 2800,
+                    audio_bitrate_kbps: 128,
+                    variant_playlist_file_name: "720p.m3u8".to_owned(),
+                },
+            ],
         }
     }
 
@@ -172,5 +208,13 @@ mod tests {
         let result = policy.validate_upload("demo.mp4", "video/mp4", 1_073_741_825);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn policy_includes_multi_resolution_ladder() {
+        let policy = sample_policy();
+
+        assert_eq!(policy.adaptive_rendition_ladder.len(), 3);
+        assert_eq!(policy.adaptive_rendition_ladder[1].name, "480p");
     }
 }

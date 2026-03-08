@@ -17,12 +17,13 @@ Current files:
 Local usage:
 
 ```bash
-./scripts/local/start-infra.sh
-./scripts/local/db-migrate.sh
+./scripts/local/deploy-local-lite.sh --bootstrap-db
 ```
 
-Backup before risky changes:
+Later schema changes can be applied with:
 
 ```bash
-./scripts/local/db-backup.sh
+./scripts/local/deploy-local-lite.sh --migrate-db
 ```
+
+The packaged local and STG-Lite deploy scripts track applied migration filenames in `schema_migrations` and only apply pending `*.up.sql` files when migration execution is explicitly requested.

@@ -4,7 +4,8 @@ use uuid::Uuid;
 
 use crate::application::{
     CompleteUploadCommand, CompletedUploadPartInput, CreateVideoUploadCommand,
-    CreateVideoUploadResult, SignUploadPartsCommand, SignUploadPartsResult,
+    CreateVideoUploadResult, ListRecentVideosResult, SignUploadPartsCommand, SignUploadPartsResult,
+    VideoDetailsResult,
 };
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +150,88 @@ pub struct CompleteUploadResponse {
     pub status: String,
     pub processing_job_id: Uuid,
     pub playback_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoSummaryResponse {
+    pub public_id: String,
+    pub title: Option<String>,
+    pub original_filename: String,
+    pub status: String,
+    pub is_streamable: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub playback_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRecentVideosResponse {
+    pub videos: Vec<VideoSummaryResponse>,
+    pub page: usize,
+    pub page_size: usize,
+    pub total_count: i64,
+    pub total_pages: usize,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
+}
+
+impl From<ListRecentVideosResult> for ListRecentVideosResponse {
+    fn from(value: ListRecentVideosResult) -> Self {
+        Self {
+            videos: value
+                .videos
+                .into_iter()
+                .map(|video| VideoSummaryResponse {
+                    public_id: video.public_id,
+                    title: video.title,
+                    original_filename: video.original_filename,
+                    status: video.status,
+                    is_streamable: video.is_streamable,
+                    created_at: video.created_at,
+                    updated_at: video.updated_at,
+                    playback_path: video.playback_path,
+                })
+                .collect(),
+            page: value.page,
+            page_size: value.page_size,
+            total_count: value.total_count,
+            total_pages: value.total_pages,
+            has_previous_page: value.has_previous_page,
+            has_next_page: value.has_next_page,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoDetailsResponse {
+    pub public_id: String,
+    pub title: Option<String>,
+    pub original_filename: String,
+    pub status: String,
+    pub is_streamable: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub playback_path: String,
+    pub manifest_url: Option<String>,
+}
+
+impl From<VideoDetailsResult> for VideoDetailsResponse {
+    fn from(value: VideoDetailsResult) -> Self {
+        Self {
+            public_id: value.public_id,
+            title: value.title,
+            original_filename: value.original_filename,
+            status: value.status,
+            is_streamable: value.is_streamable,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            playback_path: value.playback_path,
+            manifest_url: value.manifest_url,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

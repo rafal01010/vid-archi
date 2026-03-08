@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::http::error::{AppError, AppResult};
@@ -20,12 +20,73 @@ impl VideoRepository {
     }
 
     pub async fn public_id_exists(&self, public_id: &str) -> AppResult<bool> {
-        let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM videos WHERE public_id = $1)")
-            .bind(public_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM videos WHERE public_id = $1)",
+        )
+        .bind(public_id)
+        .fetch_one(&self.pool)
+        .await?;
 
         Ok(exists)
+    }
+
+    pub async fn count_videos(&self) -> AppResult<i64> {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM videos")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AppError::from)
+    }
+
+    pub async fn list_recent_videos(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<VideoSummaryRecord>> {
+        sqlx::query_as::<_, VideoSummaryRecord>(
+            r#"
+            SELECT
+                public_id,
+                title,
+                original_filename,
+                status::text AS status,
+                is_streamable,
+                created_at,
+                updated_at
+            FROM videos
+            ORDER BY created_at DESC
+            LIMIT $1
+            OFFSET $2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    pub async fn find_video_by_public_id(
+        &self,
+        public_id: &str,
+    ) -> AppResult<Option<VideoDetailRecord>> {
+        sqlx::query_as::<_, VideoDetailRecord>(
+            r#"
+            SELECT
+                public_id,
+                title,
+                original_filename,
+                status::text AS status,
+                is_streamable,
+                created_at,
+                updated_at
+            FROM videos
+            WHERE public_id = $1
+            "#,
+        )
+        .bind(public_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::from)
     }
 
     pub async fn create_video_and_upload_session(
@@ -305,4 +366,26 @@ pub struct FinalizedUploadRecord {
     pub public_id: String,
     pub video_status: String,
     pub processing_job_id: Uuid,
+}
+
+#[derive(Debug, FromRow)]
+pub struct VideoSummaryRecord {
+    pub public_id: String,
+    pub title: Option<String>,
+    pub original_filename: String,
+    pub status: String,
+    pub is_streamable: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+pub struct VideoDetailRecord {
+    pub public_id: String,
+    pub title: Option<String>,
+    pub original_filename: String,
+    pub status: String,
+    pub is_streamable: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }

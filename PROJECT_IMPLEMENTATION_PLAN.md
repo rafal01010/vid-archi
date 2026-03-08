@@ -20,6 +20,29 @@ How to apply references:
 - Use `youtube_system_design_reference.md` for implementation primitives (multipart upload, manifest, segmenting, ABR, status gating).
 - Use `Youtube-problem-writeup.md` for deeper reasoning on tradeoffs (segmented storage, pipeline orchestration, scaling reads, CDN usage).
 
+Shell-script rule:
+- When a service becomes runnable or deployable, add companion `.sh` scripts for:
+  - local execution
+  - STG deployment/build/startup handoff
+  - environment variable loading from `.env` or a passed env file
+  - STG-Lite orchestration for frontend + backend + Postgres container on the primary EC2 host when that deployment mode is used
+
+## 2.1) Mandatory Post-Generation Verification Rule
+
+After generating or editing code, immediately run the relevant unit tests before moving on.
+
+Current required commands:
+- Rust backend changes:
+  - `cargo test --manifest-path backend/Cargo.toml`
+- Rust worker changes:
+  - add a matching `cargo test --manifest-path worker/Cargo.toml` command once the worker crate exists
+- Svelte frontend changes:
+  - add and run `npm --prefix frontend run test -- --run` once the frontend test harness is scaffolded
+
+Execution rule:
+- Do not treat code generation as complete until the relevant unit tests have been run.
+- If tests cannot be run, record the blocker explicitly in notes/README/final handoff.
+
 ## 3) Exam Requirement Checklist (Must Pass)
 
 These are non-negotiable outcomes:
@@ -64,6 +87,7 @@ Recommended runtime stack:
 STG deployment profile options:
 - `STG-Lite (lowest cost, recommended first)`:
   - 1 small VM/container host for API + worker.
+  - Frontend can run on the same EC2 host for the take-home, ideally behind the same public ingress layer.
   - Postgres as a Docker container on the same host (cost-first setup).
   - S3 + CloudFront + SQS.
   - ALB as internet ingress; API Gateway intentionally omitted in STG-Lite to stay within interview budget.
@@ -237,6 +261,8 @@ Fields:
 - `content_type`
 - `size_bytes`
 - `source_s3_key`
+- `source_width` (nullable; original width from media probe)
+- `source_height` (nullable; original height from media probe)
 - `manifest_s3_key`
 - `status` (enum from lifecycle)
 - `is_streamable` (bool, derived but useful for quick filters)
@@ -278,7 +304,7 @@ Index/constraints:
 
 Fields:
 - `video_id` (FK)
-- `rendition` (`360p|720p|1080p`)
+- `rendition` (`360p|480p|720p|1080p|1440p|2160p`)
 - `codec` (e.g. h264)
 - `container` (e.g. fmp4/ts)
 - `playlist_key`
@@ -313,8 +339,11 @@ Use deterministic keys:
   - `videos/{video_id}/hls/360p/segment_{n}.ts`
   - `videos/{video_id}/hls/360p/index.m3u8`
 - Higher outputs:
+  - `videos/{video_id}/hls/480p/...`
   - `videos/{video_id}/hls/720p/...`
   - `videos/{video_id}/hls/1080p/...`
+  - `videos/{video_id}/hls/1440p/...`
+  - `videos/{video_id}/hls/2160p/...`
 - Master manifest:
   - `videos/{video_id}/hls/master.m3u8`
 
@@ -386,18 +415,36 @@ Implementation note:
 - `public_id` is deterministic: `sanitized-title-or-filename + "-" + lowercase-base32(video_id-bytes)`.
 - The playback page path returned by upload endpoints is `/v/{publicId}`.
 
-### 9.5 Get video status/details
+### 9.5 List recent videos for homepage
+
+`GET /api/videos?page=1&pageSize=10`
+
+Response:
+- `videos: [{ publicId, title, originalFilename, status, isStreamable, createdAt, updatedAt, playbackPath }]`
+- `page`, `pageSize`, `totalCount`, `totalPages`, `hasPreviousPage`, `hasNextPage`
+
+Behavior:
+- Return newest videos first using `created_at DESC`.
+- Support the homepage/frontpage feed that shows the most recent 10 uploaded videos by default.
+- Allow pagination so older videos remain browseable as uploads grow.
+- Keep the original upload-to-share-link flow intact; the homepage is an additional discovery surface, not a replacement.
+
+### 9.6 Get video status/details
 
 `GET /api/videos/{publicId}`
 
 Response:
 - `publicId`
+- `title`
+- `originalFilename`
 - `status`
 - `isStreamable`
-- `playbackUrl` (frontend route)
+- `createdAt`
+- `updatedAt`
+- `playbackPath` (frontend route)
 - `manifestUrl` (if streamable)
 
-### 9.6 Playback entrypoint (for player page)
+### 9.7 Playback entrypoint (for player page)
 
 `GET /api/videos/{publicId}/playback`
 
@@ -406,7 +453,12 @@ Response:
 - `manifestCdnUrl` when streamable
 - optional `posterUrl`
 
-### 9.7 Health/readiness
+API impact note for the expanded ladder:
+- No upload API change is required for source-capped multi-resolution support.
+- The HLS master manifest remains the source of truth for which renditions are actually available.
+- A future optional playback response field such as `availableRenditions` may improve frontend status messaging, but it is not required to implement the no-upscaling rule.
+
+### 9.8 Health/readiness
 
 `GET /healthz`
 - Includes DB, S3 reachability checks.
@@ -429,7 +481,7 @@ Response:
 3. Upload manifest/segments to S3.
 4. Create/update master manifest with 360p entry only.
 5. DB transition to `BASELINE_READY` and set `is_streamable=true` (this is the streamability gate).
-6. Worker enqueues enhancement job for 720p/1080p ABR variants.
+6. Worker probes the original file dimensions and enqueues only the higher renditions that do not exceed the source resolution.
 7. On completion, update master manifest with higher variants and set `READY`.
 
 ### 10.3 Playback flow
@@ -443,17 +495,23 @@ Response:
 ## 11) Frontend Plan (Svelte)
 
 Pages:
-- `/` upload page
+- `/` homepage with upload flow + recent-video library
 - `/v/[publicId]` playback page
 
-Upload page features:
+Homepage features:
 - file picker + drag/drop
 - client-side size/type pre-validation
 - multipart progress bar
 - error/retry states
 - show generated share link on completion
+- show recent uploads sorted newest-first
+- show 10 videos per page by default
+- previous/next pagination controls for older uploads
+- every library entry links to `/v/[publicId]`
+- monochrome styling only (`black/white/gray`)
 
 Playback page features:
+- resolve the public share ID and show lifecycle state immediately
 - status polling until streamable
 - video player using HLS manifest URL
 - fallback for unsupported browsers
@@ -462,6 +520,10 @@ Playback page features:
 UX rules aligned to exam:
 - Functional UI is enough; avoid over-investing in styling.
 - Ensure "time-to-first-play" visibly prioritized once baseline ready.
+- Write visible UI copy for end users, not for developers, reviewers, or the take-home checklist.
+- Do not expose implementation language in default UI text, including references to checklist steps, project phases, backend architecture, S3, multipart upload internals, `publicId`, route templates, or exam wording.
+- Prefer concise product language such as `File size limit`, `Accepted files`, `Status`, `Share link`, and `Recent videos`.
+- Hide internal identifiers and infrastructure details unless they are required for a real user task or an explicit admin/debug view.
 
 ## 12) Worker/Transcoding + ABR Plan
 
@@ -470,15 +532,25 @@ ffmpeg strategy for MVP:
 - Output baseline quickly:
   - 360p, moderate bitrate, short segment duration (2-4s), H.264 + AAC.
 - Generate HLS artifacts:
-  - variant playlists (`360p.m3u8`, then `720p.m3u8`, `1080p.m3u8`)
+  - variant playlists (`360p.m3u8`, then source-eligible higher variants such as `480p.m3u8`, `720p.m3u8`, `1080p.m3u8`, `1440p.m3u8`, `2160p.m3u8`)
   - master playlist (`master.m3u8`) for ABR.
 - Generate master manifest immediately with baseline entry only.
-- Later add 720p and 1080p variants and update master manifest.
+- Later add the remaining source-eligible variants and update master manifest.
 
 ABR ladder for MVP:
 - 360p baseline (first streamable target)
-- 720p standard
-- 1080p higher quality
+- 480p
+- 720p
+- 1080p
+- 1440p
+- 2160p
+
+No-upscaling rule:
+- Never generate a rendition above the source file resolution.
+- Example:
+  - a `2160p` source can expose `360p`, `480p`, `720p`, `1080p`, `1440p`, and `2160p`
+  - a `1080p` source can expose only `360p`, `480p`, `720p`, and `1080p`
+- Persist `source_width` and `source_height` in `videos` so worker decisions and architecture documentation share the same source of truth.
 
 Why this matters:
 - ABR is essential for low-bandwidth and device diversity: players can switch rendition without restarting playback.
@@ -535,7 +607,7 @@ Pragmatic behavior:
 
 Must be documented even if partially implemented:
 - Put CloudFront before S3 for playback artifacts.
-- Keep rendition set small for MVP (360p, 720p, 1080p only).
+- Keep the configured ladder explicit (`360p`, `480p`, `720p`, `1080p`, `1440p`, `2160p`) but only generate renditions up to the source resolution.
 - Use lifecycle policies:
   - Abort incomplete multipart uploads.
   - Optionally transition old originals to cheaper storage class.
@@ -602,6 +674,10 @@ Current implementation note:
   - deterministic `public_id` generation
   - upload policy validation
   - filename sanitizing and multipart normalization helpers
+- After any backend Rust code generation, run:
+  - `cargo test --manifest-path backend/Cargo.toml`
+- After future frontend Svelte code generation, run:
+  - `npm --prefix frontend run test -- --run` once Vitest or the chosen test harness is added
 
 ### 17.2 Integration tests
 - create upload session -> complete multipart -> status changes
@@ -654,10 +730,10 @@ Day 3:
 - Worker baseline processing (360p HLS) and streamability transition.
 
 Day 4:
-- Svelte upload + playback pages integrated with backend.
+- Svelte homepage upload flow integrated with backend, plus recent-video frontpage and share-link status page.
 
 Day 5:
-- Additional ABR renditions (720p/1080p), manifest updates, CDN behavior, retry/error handling.
+- Additional ABR renditions (`480p/720p/1080p/1440p/2160p` when source-eligible), manifest updates, CDN behavior, retry/error handling.
 
 Day 6:
 - Tests, observability hooks, concurrency checks, cost/scaling docs.
@@ -720,10 +796,54 @@ Region baseline:
 | `CDN_BASE_URL` | `https://d38ixt0cyn1hi6.cloudfront.net` | Build `manifestCdnUrl` from this |
 | `AWS_REGION` | `ap-northeast-1` | |
 | `UPLOAD_BUCKET` | `stg-video-upload-1a` | |
-| `PROCESSED_BUCKET` |  | Fill value |
-| `SQS_CHUNKER_QUEUE_URL` |  | Fill value |
-| `SQS_TRANSCODER_QUEUE_URL` |  | Fill value |
-| `DATABASE_URL` |  | Fill value when app wiring starts |
+| `PROCESSED_BUCKET` | `stg-video-processed-1a` | |
+| `SQS_CHUNKER_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-chunker-queue` | |
+| `SQS_TRANSCODER_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-queue` | |
+| `STG_POSTGRES_DB` | `vid-archi-db` | Container bootstrap DB name |
+| `STG_POSTGRES_USER` | `video-db-access` | Container bootstrap DB user |
+| `STG_POSTGRES_PASSWORD` | `video-db-password` | Container bootstrap DB password |
+| `STG_POSTGRES_BIND_ADDRESS` | `10.0.2.16` | Primary EC2 private IP; publish Postgres here for worker access |
+| `DATABASE_URL` | `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` | Use as `STG_DATABASE_URL`; primary app host private IP because worker runs on a separate EC2 instance |
+
+### 20A.3 Missing AWS Inventory Values To Collect
+
+Still missing from the current STG inventory:
+- Processed artifacts bucket:
+  - bucket ARN
+- Queue resources:
+  - chunker queue ARN
+  - transcoder queue ARN
+  - chunker DLQ name/URL/ARN if created
+  - transcoder DLQ name/URL/ARN if created
+- Network resources:
+  - VPC ID
+  - public subnet IDs
+  - private subnet IDs
+- Security groups:
+  - `sg-public-entry` actual SG ID
+  - `sg-api` actual SG ID
+  - `sg-worker` actual SG ID
+  - `sg-db` actual SG ID
+  - `sg-admin-ssh` actual SG ID
+- Compute:
+  - primary EC2 instance ID
+  - primary EC2 public IP
+  - worker EC2 instance ID
+  - worker EC2 private IP
+  - worker EC2 public IP if assigned
+- IAM:
+  - EC2 app/worker role name
+  - EC2 app/worker role ARN
+- Runtime config values:
+  - none remaining for app/worker DB connectivity; current STG DB URL is known
+
+STG database access note:
+- If backend and worker processes run on the same primary EC2 host as the Postgres container, use `127.0.0.1:5432` in the STG DB URL.
+- If chunker/transcoder later run on separate EC2 instances, the Postgres container must listen on the primary host private interface and only allow VPC-private access from the API/worker security groups.
+- In that split-host case, use the primary EC2 private IP or private DNS name in `STG_DATABASE_URL`, not `localhost`.
+- Current confirmed STG shape: backend/API runs on the primary EC2 host with Postgres, while chunker/transcoder containers run on a separate worker EC2 instance. Use `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` as the STG DB URL.
+- Deployment implication: the STG Postgres container can no longer bind only to `127.0.0.1`; it must listen on the primary host private interface so the worker EC2 instance can connect over the VPC.
+- STG deploy-script rule: when bootstrapping the Postgres container, initialize it with `STG_POSTGRES_DB`, `STG_POSTGRES_USER`, and `STG_POSTGRES_PASSWORD`, publish `5432` on `STG_POSTGRES_BIND_ADDRESS`, and run Postgres with `listen_addresses='*'`.
 
 ## 21) Ordered What-To-Do-Next Checklist
 
@@ -733,6 +853,41 @@ Checked items (`[x]`) are done items.
 - [x] 1a. Create monorepo folders (`backend`, `worker`, `frontend`, `docs`) and base READMEs.
 - [x] 1b. Add local dev config (`.env.example`, docker-compose for Postgres/local S3 emulator if used).
 - [x] 1c. Define shared constants (max upload size 1GB, allowed MIME types, baseline rendition profile).
+- [x] 1d. Create shell scripts for local run and STG deployment handoff for backend/frontend services as they become runnable.
+- [x] 1e. Create STG-Lite orchestration scripts for frontend + backend + Postgres container deployment on the primary EC2 host.
+
+Current script scope:
+- STG-Lite deployment scripts should package backend/frontend artifacts and start the packaged services by default.
+- Database bootstrap and schema migration execution must be explicit flags, not default deploy behavior.
+- First-time DB setup should use `--bootstrap-db`.
+- Full database reset should use `--reset-db` and must remain an explicit destructive action.
+- Later schema changes should use `--migrate-db`.
+- Local packaged-service scripts should wrap the same flow with local defaults, including MinIO startup and `.env.local` as the default env file.
+- The single preferred local command is `./scripts/local/deploy-local-lite.sh`; older split local infra scripts should be removed once the packaged local path exists.
+
+First-time deployment commands:
+- Local:
+  - `./scripts/local/deploy-local-lite.sh --bootstrap-db`
+- STG:
+  - `./scripts/stg/deploy-stg-lite.sh --bootstrap-db`
+
+Normal redeploy commands:
+- Local:
+  - `./scripts/local/deploy-local-lite.sh`
+- STG:
+  - `./scripts/stg/deploy-stg-lite.sh`
+
+Schema migration commands after first deploy:
+- Local:
+  - `./scripts/local/deploy-local-lite.sh --migrate-db`
+- STG:
+  - `./scripts/stg/deploy-stg-lite.sh --migrate-db`
+
+Destructive DB reset commands:
+- Local:
+  - `./scripts/local/deploy-local-lite.sh --reset-db`
+- STG:
+  - `./scripts/stg/deploy-stg-lite.sh --reset-db`
 
 - [x] 2. Implement DB schema + migrations for `videos`, `upload_sessions`, `upload_parts`, `video_renditions`, `processing_jobs`.
 
@@ -740,9 +895,14 @@ Checked items (`[x]`) are done items.
 - [x] 3b. Implement part-signing endpoint and complete-upload endpoint.
 - [x] 3c. Implement deterministic `public_id` share-link generation and uniqueness checks.
 
-- [ ] 4a. Build frontend upload page with file validation and progress UI.
-- [ ] 4b. Wire frontend multipart part uploads directly to S3.
-- [ ] 4c. On completion, display share URL (`/v/{publicId}`).
+- [x] 4a. Build frontend upload page with file validation and progress UI.
+- [x] 4b. Wire frontend multipart part uploads directly to S3.
+- [x] 4c. On completion, display share URL (`/v/{publicId}`).
+
+Implementation note for `4a/4b/4c`:
+- The homepage now combines both user flows: direct upload to shareable link, plus browsing recent uploads from newest to oldest before clicking into the share page.
+- The homepage feed now defaults to 10 videos per page and supports previous/next pagination.
+- Supporting backend read endpoints added: `GET /api/videos?page=1&pageSize=10` and `GET /api/videos/{publicId}`.
 
 - [ ] 5a. Build worker job pickup logic and status transition guardrails.
 - [ ] 5b. Implement baseline transcoding pipeline (360p HLS segments + 360p variant playlist).
@@ -754,7 +914,7 @@ Checked items (`[x]`) are done items.
 - [ ] 6c. Integrate browser playback (native HLS or HLS.js fallback) from manifest URL.
 - [ ] 6d. Enable ABR behavior in player (auto quality selection and variant switching).
 
-- [ ] 7a. Implement enhancement transcoding pipeline for 720p/1080p ABR variants.
+- [ ] 7a. Implement enhancement transcoding pipeline for source-eligible `480p/720p/1080p/1440p/2160p` ABR variants without upscaling.
 - [ ] 7b. Update master manifest safely and transition final status to `READY`.
 - [ ] 7c. Persist rendition metadata in `video_renditions`.
 - [ ] 7d. Configure CDN cache behavior for manifests and segments; validate first-play path via CloudFront URLs.

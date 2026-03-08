@@ -1,6 +1,65 @@
 # API Contract
 
-This document reflects the upload API currently implemented in the Rust backend.
+This document reflects the API currently implemented in the Rust backend.
+
+## Homepage And Share-Page Read Flow
+
+1. `GET /api/videos?page=1&pageSize=10`
+2. `GET /api/videos/{publicId}`
+
+The frontend homepage now uses a combined flow:
+- upload a new video directly from `/`
+- refresh the recent uploads library after completion
+- click any library entry to open the share-page route `/v/{publicId}`
+
+## `GET /api/videos?page=1&pageSize=10`
+
+Returns the most recent videos, sorted newest first by `created_at`, with homepage pagination metadata.
+
+Response:
+
+```json
+{
+  "page": 1,
+  "pageSize": 10,
+  "totalCount": 37,
+  "totalPages": 4,
+  "hasPreviousPage": false,
+  "hasNextPage": true,
+  "videos": [
+    {
+      "publicId": "demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+      "title": "Demo upload",
+      "originalFilename": "demo.mp4",
+      "status": "UPLOADED",
+      "isStreamable": false,
+      "createdAt": "2026-03-08T14:00:00Z",
+      "updatedAt": "2026-03-08T14:03:00Z",
+      "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq"
+    }
+  ]
+}
+```
+
+## `GET /api/videos/{publicId}`
+
+Returns the current lifecycle state and route metadata for a single public share ID.
+
+Response:
+
+```json
+{
+  "publicId": "demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "title": "Demo upload",
+  "originalFilename": "demo.mp4",
+  "status": "UPLOADED",
+  "isStreamable": false,
+  "createdAt": "2026-03-08T14:00:00Z",
+  "updatedAt": "2026-03-08T14:03:00Z",
+  "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "manifestUrl": null
+}
+```
 
 ## Upload Session Flow
 
@@ -109,4 +168,4 @@ Response:
 - First successful part-sign request: `UPLOADING`
 - Complete upload: `UPLOADED`
 
-The next checklist step will consume the queued `BASELINE` job and move the video into the processing states.
+The read endpoints let the homepage and the share page reflect those transitions immediately. The homepage currently uses the paginated read endpoint to show the newest 10 videos first. The next checklist step will consume the queued `BASELINE` job and move the video into the processing states.

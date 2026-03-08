@@ -49,8 +49,11 @@ BEGIN
   ) THEN
     CREATE TYPE video_rendition_name AS ENUM (
       '360p',
+      '480p',
       '720p',
-      '1080p'
+      '1080p',
+      '1440p',
+      '2160p'
     );
   END IF;
 END
@@ -120,6 +123,8 @@ CREATE TABLE IF NOT EXISTS videos (
   content_type TEXT NOT NULL,
   size_bytes BIGINT NOT NULL,
   source_s3_key TEXT NOT NULL,
+  source_width INTEGER,
+  source_height INTEGER,
   manifest_s3_key TEXT,
   status video_status NOT NULL DEFAULT 'INITIATED',
   is_streamable BOOLEAN NOT NULL DEFAULT FALSE,
@@ -139,6 +144,19 @@ CREATE TABLE IF NOT EXISTS videos (
         'video/webm',
         'video/x-msvideo',
         'video/vnd.avi'
+      )
+    ),
+  CONSTRAINT videos_source_dimensions_valid
+    CHECK (
+      (
+        source_width IS NULL
+        AND source_height IS NULL
+      )
+      OR (
+        source_width IS NOT NULL
+        AND source_height IS NOT NULL
+        AND source_width > 0
+        AND source_height > 0
       )
     ),
   CONSTRAINT videos_streamable_requires_manifest

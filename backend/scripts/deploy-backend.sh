@@ -42,7 +42,7 @@ echo "Building release binary"
 cargo build --release --manifest-path backend/Cargo.toml
 
 mkdir -p "${OUTPUT_DIR}"
-cp "${REPO_ROOT}/target/release/vid-archi-backend" "${OUTPUT_DIR}/vid-archi-backend"
+cp "${REPO_ROOT}/backend/target/release/vid-archi-backend" "${OUTPUT_DIR}/vid-archi-backend"
 cp "${REPO_ROOT}/config/video_policy.json" "${OUTPUT_DIR}/video_policy.json"
 cp "${REPO_ROOT}/.env.example" "${OUTPUT_DIR}/.env.example"
 

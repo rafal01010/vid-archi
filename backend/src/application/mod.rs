@@ -1,6 +1,8 @@
 mod upload_service;
+mod video_query_service;
 
 pub use upload_service::{
-    CompleteUploadCommand, CompleteUploadResult, CreateVideoUploadCommand, CreateVideoUploadResult,
-    SignUploadPartsCommand, SignUploadPartsResult, UploadService,
+    CompleteUploadCommand, CompletedUploadPartInput, CreateVideoUploadCommand,
+    CreateVideoUploadResult, SignUploadPartsCommand, SignUploadPartsResult, UploadService,
 };
+pub use video_query_service::{ListRecentVideosResult, VideoDetailsResult, VideoQueryService};
