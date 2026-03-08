@@ -1,0 +1,22 @@
+[package]
+name = "vid-archi-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+aws-credential-types = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+data-encoding = "2"
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "postgres", "runtime-tokio-rustls", "uuid"] }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["serde", "v4"] }

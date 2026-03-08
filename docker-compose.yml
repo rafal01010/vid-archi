@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: vid-archi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-video_stg}
+      POSTGRES_USER: ${POSTGRES_USER:-video_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-video_app_local}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-video_app} -d ${POSTGRES_DB:-video_stg}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    container_name: vid-archi-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-bootstrap:
+    image: minio/mc:RELEASE.2025-02-21T16-00-46Z
+    container_name: vid-archi-minio-bootstrap
+    depends_on:
+      - minio
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c
+      "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123}; do sleep 2; done &&
+      mc mb --ignore-existing local/${LOCAL_UPLOAD_BUCKET:-video-upload-local} &&
+      mc mb --ignore-existing local/${LOCAL_PROCESSED_BUCKET:-video-processed-local}
+      "
+
+volumes:
+  postgres-data:
+  minio-data:

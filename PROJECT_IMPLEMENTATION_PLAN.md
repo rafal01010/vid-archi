@@ -24,7 +24,7 @@ How to apply references:
 
 These are non-negotiable outcomes:
 - Users can upload video files (up to 1GB).
-- Support common formats (at least MP4/MOV/WebM input).
+- Support common formats (at least MP4/MOV/WebM input; current implementation policy also accepts AVI uploads).
 - Upload can be anonymous (no auth required).
 - System generates a shareable link per video.
 - Visiting shareable link streams video in browser.
@@ -57,7 +57,7 @@ Recommended runtime stack:
 - Worker: Rust + Tokio + ffmpeg invocation.
 - Frontend: SvelteKit + HTML5 video (HLS.js if needed).
 - Object storage: AWS S3.
-- Metadata DB: Postgres (MVP). Cost-optimized STG-Lite can run Postgres in a Docker container on EC2; production-like target is managed Postgres (RDS).
+- Metadata DB: Postgres (MVP). The current implementation path uses a Postgres Docker container for both local development and STG-Lite on EC2. Production-like target is managed Postgres (RDS).
 - Async trigger: SQS queue (or S3 event -> webhook endpoint for MVP).
 - CDN: CloudFront in front of S3 for manifests/segments.
 
@@ -78,7 +78,8 @@ STG deployment profile options:
   - Optional autoscaling group for API.
 
 STG-Lite database note:
-- For interview-budget environments, prefer local Postgres container on EC2.
+- For interview-budget environments, prefer a Postgres container on EC2 with a persistent Docker volume.
+- Local development follows the same shape: Postgres container plus persistent Docker volume.
 - Keep DB private to the host/network; do not expose 5432 publicly.
 - Example bootstrap command:
 ```bash
@@ -92,6 +93,12 @@ docker run -d \
   -p 127.0.0.1:5432:5432 \
   postgres:16
 ```
+- Persistence rule:
+  - stopping or recreating the container does not remove data if the named volume is preserved
+  - data is lost if the volume is deleted or the host disk is lost
+- Backup rule:
+  - take regular SQL backups with `pg_dump`
+  - for EC2 STG, also treat EBS snapshots as an infrastructure-level recovery option
 - Ideal future upgrade path: move to RDS Postgres when higher availability/ops isolation is required.
 
 API Gateway decision note:
@@ -148,20 +155,75 @@ Critical design principles:
 
 ## 6) Video Lifecycle State Machine
 
-Use explicit states in DB:
-- `INITIATED` (video record created, session open)
-- `UPLOADING` (multipart in progress)
-- `UPLOADED` (S3 object completed)
-- `PROCESSING_BASELINE` (360p rendition in progress)
-- `BASELINE_READY` (streamable; primary exam success condition)
-- `PROCESSING_FULL` (additional renditions ongoing)
-- `READY` (all planned renditions complete)
-- `FAILED` (terminal error after retries)
+Use explicit states in DB. The goal is to distinguish:
+- upload lifecycle
+- first streamable moment
+- background enhancement after the video is already playable
+- terminal failure
+
+Recommended happy-path transition:
+
+```text
+INITIATED
+  -> UPLOADING
+  -> UPLOADED
+  -> PROCESSING_BASELINE
+  -> BASELINE_READY
+  -> PROCESSING_FULL
+  -> READY
+```
+
+State definitions:
+- `INITIATED`
+  - Meaning: the `videos` row exists and an upload session can now be created or has just been created.
+  - Playback: not streamable.
+  - Typical entry condition: API accepted video metadata and reserved a public share ID.
+  - Typical exit: client begins multipart upload and state moves to `UPLOADING`.
+- `UPLOADING`
+  - Meaning: multipart upload is in progress.
+  - Playback: not streamable.
+  - Typical entry condition: at least one upload part has started or upload session is actively being used.
+  - Typical exit: S3 multipart completion succeeds and the source object is now durable.
+- `UPLOADED`
+  - Meaning: the original source file exists in object storage, but no streamable rendition is available yet.
+  - Playback: not streamable.
+  - Typical entry condition: S3 upload completed event or trusted completion flow finalized the source object.
+  - Typical exit: worker claims a baseline processing job and starts generating `360p` HLS output.
+- `PROCESSING_BASELINE`
+  - Meaning: the system is producing the first low-quality streamable rendition, which is the exam-critical path.
+  - Playback: not streamable yet.
+  - Typical entry condition: worker started baseline transcoding and manifest packaging.
+  - Typical exit: baseline playlist, segments, and master manifest entry exist in storage.
+- `BASELINE_READY`
+  - Meaning: the first streamable version is available. This is the first success condition for the project.
+  - Playback: streamable now.
+  - Typical artifact expectation: `360p` HLS output exists and the master manifest points to it.
+  - Why this state exists separately: it marks the exact time-to-stream milestone before additional renditions begin.
+  - Typical exit: worker continues with higher renditions and moves to `PROCESSING_FULL`.
+- `PROCESSING_FULL`
+  - Meaning: the video is already streamable, but higher-quality renditions such as `720p` and `1080p` are still being generated.
+  - Playback: still streamable.
+  - Why this state matters: it distinguishes "playable at baseline quality" from "playable while quality improvements are still in progress."
+  - Typical exit: all planned renditions are finished and the final master manifest is complete.
+- `READY`
+  - Meaning: all planned processing is complete.
+  - Playback: streamable.
+  - Typical artifact expectation: baseline and higher renditions are present, rendition metadata is finalized, and no more processing work is pending for the video.
+  - This is the final steady state for successful processing.
+- `FAILED`
+  - Meaning: processing or upload-related recovery has exhausted retries or hit a terminal validation/media error.
+  - Playback: not streamable unless failure happened after a previously streamable state and the system explicitly chooses to preserve that behavior.
+  - Typical artifact expectation: error code/message are captured for UI, logs, and debugging.
+  - This is a terminal state unless the system later adds an explicit manual retry/reset flow.
 
 State transition rules:
-- Do not return `streamable=true` until manifest exists and `BASELINE_READY` or `READY`.
+- Do not return `streamable=true` until manifest exists and status is `BASELINE_READY`, `PROCESSING_FULL`, or `READY`.
+- Treat `BASELINE_READY` as the first streamable milestone and the primary exam success condition.
+- Use `PROCESSING_FULL` only after the video is already playable and the worker is continuing enhancement work in the background.
+- `READY` means all planned renditions for the current MVP ladder are complete.
 - Transition writes must be atomic and idempotent.
-- Worker should tolerate duplicate events.
+- Worker should tolerate duplicate events and repeated queue deliveries.
+- Shared DB state is the source of truth; never rely on per-instance memory to decide streamability.
 
 ## 7) Data Model (Minimal But Complete)
 
@@ -269,7 +331,7 @@ Benefits:
 
 Request:
 - `filename`
-- `contentType`
+- `contentType` (allow `video/mp4`, `video/quicktime`, `video/webm`, `video/x-msvideo`, `video/vnd.avi`)
 - `sizeBytes` (validate `<= 1GB`)
 - optional `title`
 
@@ -278,19 +340,24 @@ Response:
 - `publicId`
 - `uploadSessionId`
 - `s3UploadId`
+- `sourceObjectKey`
 - `partSizeBytes`
-- `presignedPartUrlTemplate` or first batch URLs
+- `uploadExpiresAt`
+- `signPartsEndpoint`
 - `completeUploadEndpoint`
+- `playbackPath`
 
 ### 9.2 Sign parts (if not pre-generated)
 
 `POST /api/videos/{videoId}/parts/sign`
 
 Request:
+- `uploadSessionId`
 - list of `partNumbers`
 
 Response:
-- `[{ partNumber, url }]`
+- `expiresAt`
+- `[{ partNumber, url, method }]`
 
 ### 9.3 Record part uploaded (optional metadata tracking)
 
@@ -312,7 +379,12 @@ Request:
 Behavior:
 - Complete S3 multipart.
 - Mark video `UPLOADED`.
-- Enqueue baseline processing.
+- Insert baseline processing job in `processing_jobs` (`QUEUED`, attempt `1`).
+
+Implementation note:
+- Current backend implementation lives under `backend/src`.
+- `public_id` is deterministic: `sanitized-title-or-filename + "-" + lowercase-base32(video_id-bytes)`.
+- The playback page path returned by upload endpoints is `/v/{publicId}`.
 
 ### 9.5 Get video status/details
 
@@ -525,6 +597,12 @@ Alerts:
 - upload size/type validators
 - manifest URL generation logic
 
+Current implementation note:
+- Minimal unit tests now exist for the generated upload-path logic:
+  - deterministic `public_id` generation
+  - upload policy validation
+  - filename sanitizing and multipart normalization helpers
+
 ### 17.2 Integration tests
 - create upload session -> complete multipart -> status changes
 - worker baseline process updates DB + artifacts
@@ -652,15 +730,15 @@ Region baseline:
 This list is intentionally execution-ordered; completing all items should produce a functioning exam-compliant project.
 Checked items (`[x]`) are done items.
 
-- [ ] 1a. Create monorepo folders (`backend`, `worker`, `frontend`, `docs`) and base READMEs.
-- [ ] 1b. Add local dev config (`.env.example`, docker-compose for Postgres/local S3 emulator if used).
-- [ ] 1c. Define shared constants (max upload size 1GB, allowed MIME types, baseline rendition profile).
+- [x] 1a. Create monorepo folders (`backend`, `worker`, `frontend`, `docs`) and base READMEs.
+- [x] 1b. Add local dev config (`.env.example`, docker-compose for Postgres/local S3 emulator if used).
+- [x] 1c. Define shared constants (max upload size 1GB, allowed MIME types, baseline rendition profile).
 
-- [ ] 2. Implement DB schema + migrations for `videos`, `upload_sessions`, `upload_parts`, `video_renditions`, `processing_jobs`.
+- [x] 2. Implement DB schema + migrations for `videos`, `upload_sessions`, `upload_parts`, `video_renditions`, `processing_jobs`.
 
-- [ ] 3a. Implement `POST /api/videos` (create video + upload session + S3 multipart init).
-- [ ] 3b. Implement part-signing endpoint and complete-upload endpoint.
-- [ ] 3c. Implement deterministic `public_id` share-link generation and uniqueness checks.
+- [x] 3a. Implement `POST /api/videos` (create video + upload session + S3 multipart init).
+- [x] 3b. Implement part-signing endpoint and complete-upload endpoint.
+- [x] 3c. Implement deterministic `public_id` share-link generation and uniqueness checks.
 
 - [ ] 4a. Build frontend upload page with file validation and progress UI.
 - [ ] 4b. Wire frontend multipart part uploads directly to S3.
@@ -740,11 +818,12 @@ Checked items (`[x]`) are done items.
 - [x] 0e.2 Install Docker and run Postgres container on EC2 (`postgres:16`) with persistent volume.
 - [x] 0e.3 Keep Postgres access private (bind `127.0.0.1:5432` or private subnet only).
 - [ ] 0e.4 Configure API/worker env vars to use containerized Postgres connection string.
-- [ ] 0e.5 Document that RDS Postgres is the production-like replacement when budget/ops requirements increase.
-- [x] 0e.6 (Scale-out option) Provision separate compute for processing pools:
+- [ ] 0e.5 Document DB backup/recovery plan for containerized Postgres (`pg_dump` + restore workflow, optional EBS snapshots).
+- [ ] 0e.6 Document that RDS Postgres is the production-like replacement when budget/ops requirements increase.
+- [x] 0e.7 (Scale-out option) Provision separate compute for processing pools:
   - `chunker` instance/service
   - `transcoder` instance/service(s)
-- [x] 0e.7 (Scale-out option) Use separate queue stages for processing:
+- [x] 0e.8 (Scale-out option) Use separate queue stages for processing:
   - upload-complete -> chunker queue
   - chunker output -> transcoder queue (per rendition jobs)
 - [ ] 0e.8 (Scale-out option) Configure autoscaling triggers for processing pools based on queue depth.
