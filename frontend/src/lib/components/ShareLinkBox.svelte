@@ -3,22 +3,50 @@
 
 	export let sharePath = '';
 
-	let copied = false;
+	let copyState = 'idle';
 
 	$: shareUrl =
 		browser && sharePath ? new URL(sharePath, window.location.origin).toString() : sharePath;
+	$: copyButtonLabel =
+		copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy link';
 
 	async function handleCopyLink() {
 		if (!browser || !shareUrl) {
 			return;
 		}
 
-		await navigator.clipboard.writeText(shareUrl);
-		copied = true;
+		try {
+			await copyTextToClipboard(shareUrl);
+			copyState = 'copied';
+		} catch {
+			copyState = 'error';
+		}
 
 		window.setTimeout(() => {
-			copied = false;
+			copyState = 'idle';
 		}, 1800);
+	}
+
+	async function copyTextToClipboard(text) {
+		if (navigator.clipboard?.writeText && window.isSecureContext) {
+			await navigator.clipboard.writeText(text);
+			return;
+		}
+
+		const fallbackInput = document.createElement('textarea');
+		fallbackInput.value = text;
+		fallbackInput.setAttribute('readonly', 'true');
+		fallbackInput.style.position = 'absolute';
+		fallbackInput.style.left = '-9999px';
+		document.body.appendChild(fallbackInput);
+		fallbackInput.select();
+
+		const copySucceeded = document.execCommand('copy');
+		document.body.removeChild(fallbackInput);
+
+		if (!copySucceeded) {
+			throw new Error('Clipboard copy failed.');
+		}
 	}
 </script>
 
@@ -31,7 +59,7 @@
 
 		<div class="share-actions">
 			<button class="button-secondary" type="button" on:click={handleCopyLink}>
-				{copied ? 'Copied' : 'Copy link'}
+				{copyButtonLabel}
 			</button>
 			<a class="button-primary" href={sharePath}>Open page</a>
 		</div>

@@ -15,6 +15,11 @@
 	$: isDeleting = deletePhase === 'deleting';
 	$: panelClassName = variant === 'card' ? 'delete-panel card-variant' : 'delete-panel page-variant';
 	$: deleteButtonLabel = isDeleting ? 'Deleting...' : 'Delete video';
+	$: toggleButtonLabel = isFormVisible ? 'Cancel' : 'Delete with code';
+	$: helperCopy =
+		variant === 'card'
+			? 'Need to remove this upload? Use the delete code from upload time.'
+			: 'Delete this upload if you still have the delete code from upload time.';
 
 	function handleDeleteToggle() {
 		isFormVisible = !isFormVisible;
@@ -48,10 +53,16 @@
 	{#if deletePhase === 'deleted'}
 		<div class="message message-success">Video deleted.</div>
 	{:else}
-		<div class="delete-actions">
-			<button class="button-secondary delete-toggle" type="button" on:click={handleDeleteToggle}>
-				{isFormVisible ? 'Cancel' : 'Delete video'}
-			</button>
+		<div class="delete-summary">
+			<div class="delete-copy-block">
+				<p class="delete-label">Delete video</p>
+				<p class="delete-copy">{helperCopy}</p>
+			</div>
+			<div class="delete-actions">
+				<button class="delete-toggle" type="button" on:click={handleDeleteToggle}>
+					{toggleButtonLabel}
+				</button>
+			</div>
 		</div>
 
 		{#if isFormVisible}
@@ -83,15 +94,50 @@
 	.delete-panel {
 		display: grid;
 		gap: 12px;
-		padding: 18px;
-		border-radius: 22px;
-		background: rgba(255, 255, 255, 0.84);
-		border: 1px solid rgba(0, 0, 0, 0.1);
+		padding: 16px 18px;
+		border-radius: 18px;
+		background: rgba(17, 18, 20, 0.03);
+		border: 1px solid rgba(0, 0, 0, 0.08);
 	}
 
 	.card-variant {
-		padding: 14px;
-		border-radius: 18px;
+		padding: 14px 20px 18px;
+		border-radius: 0;
+		background: transparent;
+		border: 0;
+		border-top: 1px solid rgba(0, 0, 0, 0.08);
+	}
+
+	.delete-summary {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+
+	.delete-copy-block {
+		display: grid;
+		gap: 4px;
+	}
+
+	.delete-label,
+	.delete-copy {
+		margin: 0;
+	}
+
+	.delete-label {
+		font-size: 0.76rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+	}
+
+	.delete-copy {
+		max-width: 40ch;
+		color: var(--text-muted);
+		font-size: 0.9rem;
 	}
 
 	.delete-actions {
@@ -103,6 +149,24 @@
 	.delete-form {
 		display: grid;
 		gap: 10px;
+	}
+
+	.delete-toggle {
+		appearance: none;
+		border: 1px solid rgba(0, 0, 0, 0.12);
+		border-radius: 999px;
+		padding: 8px 13px;
+		background: rgba(255, 255, 255, 0.78);
+		color: var(--text-muted);
+		font-size: 0.88rem;
+		font-weight: 600;
+		transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+	}
+
+	.delete-toggle:hover {
+		background: rgba(17, 18, 20, 0.08);
+		color: var(--text-strong);
+		border-color: rgba(0, 0, 0, 0.2);
 	}
 
 	.button-danger {
@@ -134,5 +198,12 @@
 		border-radius: 16px;
 		background: var(--danger-soft);
 		color: var(--danger);
+	}
+
+	@media (max-width: 640px) {
+		.card-variant,
+		.page-variant {
+			padding-inline: 14px;
+		}
 	}
 </style>

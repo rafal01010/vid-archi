@@ -268,16 +268,16 @@
 	.bottom-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-		gap: 14px;
-		margin-top: 18px;
+		gap: 12px;
+		margin-top: 16px;
 	}
 
 	.details-card,
 	.player-placeholder,
 	.player-card,
 	.failure-card {
-		padding: 20px;
-		border-radius: 22px;
+		padding: 16px 18px;
+		border-radius: 18px;
 		background: rgba(255, 255, 255, 0.84);
 		border: 1px solid rgba(0, 0, 0, 0.1);
 	}
@@ -301,8 +301,8 @@
 	}
 
 	.detail-label {
-		margin: 0 0 8px;
-		font-size: 0.8rem;
+		margin: 0 0 6px;
+		font-size: 0.74rem;
 		font-weight: 700;
 		letter-spacing: 0.04em;
 		text-transform: uppercase;
@@ -312,13 +312,18 @@
 	.detail-value {
 		margin: 0;
 		word-break: break-word;
+		font-size: 0.98rem;
+		font-weight: 600;
+		line-height: 1.35;
 	}
 
 	.detail-copy {
-		margin-top: 8px;
+		margin-top: 6px;
+		font-size: 0.9rem;
 	}
 
 	.refresh-note {
 		margin-top: 18px;
+		font-size: 0.9rem;
 	}
 </style>

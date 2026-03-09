@@ -52,16 +52,20 @@
 		<div class="video-grid">
 			{#each videos as video}
 				<article class="video-card">
-					<div class="video-card-content">
+					<a class="video-card-link" href={video.playbackPath}>
 						<div class="video-card-top">
 							<span class="meta-text">Uploaded {formatDate(video.createdAt)}</span>
+							<span class="video-status">{describeVideoStatus(video.status)}</span>
 						</div>
-						<h3>{video.title || video.originalFilename}</h3>
-						<p>{describeVideoStatus(video.status)}</p>
+						<div class="video-card-content">
+							<h3>{video.title || video.originalFilename}</h3>
+							<p class="video-card-copy">Open the video page to watch or check processing progress.</p>
+						</div>
 						<div class="video-card-footer">
-							<a class="inline-link" href={video.playbackPath}>Open video</a>
+							<span class="meta-text">Watch, copy the link, or check processing</span>
+							<span class="card-open-button">Open video</span>
 						</div>
-					</div>
+					</a>
 					<DeleteVideoPanel
 						publicId={video.publicId}
 						variant="card"
@@ -124,11 +128,11 @@
 
 	.video-card {
 		display: grid;
-		gap: 12px;
-		padding: 20px;
+		gap: 0;
 		border-radius: 24px;
 		background: rgba(255, 255, 255, 0.84);
 		border: 1px solid rgba(0, 0, 0, 0.1);
+		overflow: hidden;
 		transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 	}
 
@@ -138,9 +142,16 @@
 		box-shadow: 0 16px 32px rgba(0, 0, 0, 0.12);
 	}
 
-	.video-card-content {
+	.video-card-link {
 		display: grid;
-		gap: 12px;
+		gap: 14px;
+		padding: 20px;
+		min-height: 178px;
+	}
+
+	.video-card-link:focus-visible {
+		outline: 2px solid rgba(17, 18, 20, 0.28);
+		outline-offset: -2px;
 	}
 
 	.video-card-top,
@@ -149,6 +160,12 @@
 		justify-content: space-between;
 		gap: 12px;
 		flex-wrap: wrap;
+		align-items: center;
+	}
+
+	.video-card-content {
+		display: grid;
+		gap: 8px;
 	}
 
 	h3 {
@@ -156,20 +173,47 @@
 		font-size: 1.05rem;
 	}
 
-	p {
+	.video-card-copy {
 		margin: 0;
 		color: var(--text-muted);
+		font-size: 0.94rem;
 	}
 
 	.video-card-footer {
-		font-size: 0.8rem;
-		color: var(--text-muted);
-		word-break: break-all;
+		margin-top: auto;
 	}
 
-	.inline-link {
-		color: var(--accent);
+	.video-status {
+		display: inline-flex;
+		align-items: center;
+		padding: 5px 10px;
+		border-radius: 999px;
+		background: rgba(17, 18, 20, 0.06);
+		color: var(--text-muted);
+		font-size: 0.75rem;
 		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+	}
+
+	.card-open-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 10px 16px;
+		border-radius: 999px;
+		background: linear-gradient(135deg, #111214 0%, #3a3d42 100%);
+		color: #f7f8fa;
+		font-size: 0.95rem;
+		font-weight: 700;
+		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.18);
+		transition: transform 140ms ease, box-shadow 140ms ease;
+	}
+
+	.video-card:hover .card-open-button,
+	.video-card-link:focus-visible .card-open-button {
+		transform: translateY(-1px);
+		box-shadow: 0 16px 28px rgba(0, 0, 0, 0.22);
 	}
 
 	.pagination-row {
