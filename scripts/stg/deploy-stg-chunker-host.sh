@@ -44,6 +44,13 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is installed but the daemon is not reachable."
+  echo "Start it with: sudo systemctl enable --now docker"
+  echo "If you just added your user to the docker group, run: newgrp docker"
+  exit 1
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "cargo is not installed. Install the Rust toolchain before deploying the chunker host."
   exit 1

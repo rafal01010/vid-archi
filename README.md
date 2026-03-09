@@ -52,6 +52,19 @@ Every API request accepts an optional `x-correlation-id` header. If the client d
 
 The staging host scripts package binaries, build images where needed, and start the services with environment-driven configuration.
 
+## STG Access
+
+- Through the ALB, open `http://<STG_ALB_DNS>`. In the current staging docs example, that is `http://stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com`.
+- If the ALB is not wired yet, you can open the frontend directly on the app host at `http://<APP_EC2_PUBLIC_IP>:4173`.
+- To verify the API directly on the app host, open `http://<APP_EC2_PUBLIC_IP>:8080/healthz`.
+- If only the app host is deployed and the worker is still down, the site should load in the browser, but uploads will not finish processing into playable HLS output.
+
+On the app host, the STG start scripts write PID files and logs into `logs/`:
+- backend process check: `ps -fp "$(cat logs/backend.pid)"`
+- frontend process check: `ps -fp "$(cat logs/frontend.pid)"`
+- backend log tail: `tail -f logs/backend.log`
+- frontend log tail: `tail -f logs/frontend.log`
+
 ## Documentation
 
 - [architecture.md](/Users/dave/LabBase/vid-archi/docs/architecture.md)

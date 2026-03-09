@@ -834,7 +834,7 @@ Region baseline:
 | Subnets | Private subnets (2 AZ) |  |  |  | Fill subnet IDs |
 | Security Group | Public ingress SG | `sg-public-entry` |  |  | ALB-facing rules |
 | Security Group | API SG | `sg-api` |  |  | App port from `sg-public-entry` only |
-| Security Group | Processing SG | `sg-processing` |  |  | No public inbound |
+| Security Group | Processing SG | `sg-processing` |  |  | No public inbound; use separate admin SSH SG or SSM for host access |
 | Security Group | DB SG | `sg-db` |  |  | 5432 only from `sg-api`/`sg-processing` |
 | Security Group | Admin SSH SG | `sg-admin-ssh` |  |  | SSH from your IP only |
 | EC2 Instance | Primary app host |  |  |  | Fill instance ID, private/public IP |
@@ -939,6 +939,12 @@ First-time deployment commands:
   - `./scripts/stg/deploy-stg-chunker-host.sh`
 - STG transcoder host:
   - `./scripts/stg/deploy-stg-transcoder-host.sh`
+
+Operational note:
+- On STG hosts, install Docker Engine plus Compose v2, then run `sudo systemctl enable --now docker` before invoking the host deploy scripts.
+- On the STG app host, backend/frontend are started as background processes rather than Docker containers; verify them with `ps -fp "$(cat logs/backend.pid)"`, `ps -fp "$(cat logs/frontend.pid)"`, and the `logs/*.log` files.
+- Browser access uses `http://<STG_ALB_DNS>` when the ALB rules are ready, or `http://<APP_EC2_PUBLIC_IP>:4173` for direct frontend access before the ALB is wired.
+- The Vite preview server must allow the ALB/browser `Host` header in STG; derive `preview.allowedHosts` from `STG_ALB_DNS` and `PUBLIC_API_BASE_URL`.
 
 Normal redeploy commands:
 - Local:
@@ -1107,7 +1113,7 @@ Checked items (`[x]`) are done items.
 - [x] 0c.7 Create security groups with least privilege:
 - [x] 0c.7a `sg-public-entry`: inbound `443` from `0.0.0.0/0` (and optional `80` redirect).
 - [x] 0c.7b `sg-api`: inbound app port only from `sg-public-entry`.
-- [x] 0c.7c `sg-processing`: no inbound from internet.
+- [x] 0c.7c `sg-processing`: no inbound from internet for application traffic; use separate admin SSH SG or SSM if host access is needed.
 - [x] 0c.7d `sg-db`: inbound `5432` only from `sg-api` and `sg-processing`.
 - [ ] 0c.8 Set public accessibility rules for review:
 - [ ] 0c.8a Public: website domain, upload/status/playback API routes, CloudFront video paths (`*.m3u8`, `*.ts`/`*.m4s`).
