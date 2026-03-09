@@ -54,8 +54,8 @@
 
 	async function syncPlayerSource() {
 		const useNativeHls = supportsNativeHls();
-		const sourceUrl = resolvePlaybackSource(manifestUrl, qualityOptions, selectedQuality, useNativeHls);
-		const attachmentKey = buildAttachmentKey(sourceUrl, selectedQuality, useNativeHls);
+		const sourceUrl = resolvePlaybackSource(manifestUrl, qualityOptions, selectedQuality);
+		const attachmentKey = buildAttachmentKey(sourceUrl, useNativeHls);
 
 		if (!sourceUrl) {
 			currentAttachmentKey = '';
@@ -77,7 +77,7 @@
 		playbackError = '';
 
 		try {
-			await attachSourceToPlayer(sourceUrl, selectedQuality, resumeTime, shouldResumePlayback, useNativeHls);
+			await attachSourceToPlayer(sourceUrl, resumeTime, shouldResumePlayback, useNativeHls);
 			currentAttachmentKey = attachmentKey;
 		} catch (error) {
 			playbackError =
@@ -85,24 +85,21 @@
 		}
 	}
 
-	function resolvePlaybackSource(activeManifestUrl, options, activeQuality, useNativeHls) {
-		if (!useNativeHls && activeManifestUrl) {
-			return activeManifestUrl;
-		}
-
+	function resolvePlaybackSource(activeManifestUrl, options, activeQuality) {
 		return resolveSelectedSourceUrl(activeManifestUrl, options, activeQuality);
 	}
 
-	function buildAttachmentKey(sourceUrl, activeQuality, useNativeHls) {
+	function buildAttachmentKey(sourceUrl, useNativeHls) {
 		if (!sourceUrl) {
 			return '';
 		}
 
-		return useNativeHls ? sourceUrl : `${sourceUrl}#${activeQuality}`;
+		return `${useNativeHls ? 'native' : 'hlsjs'}:${sourceUrl}`;
 	}
 
-	async function attachSourceToPlayer(sourceUrl, activeQuality, resumeTime, shouldResumePlayback, useNativeHls) {
+	async function attachSourceToPlayer(sourceUrl, resumeTime, shouldResumePlayback, useNativeHls) {
 		destroyHlsInstance();
+		resetVideoElement();
 
 		if (useNativeHls) {
 			attachNativeSource(sourceUrl, resumeTime, shouldResumePlayback);
@@ -120,7 +117,6 @@
 		});
 
 		hls.on(HlsConstructor.Events.MANIFEST_PARSED, async () => {
-			applyHlsQualitySelection(hls, activeQuality);
 			await restorePlaybackState(resumeTime, shouldResumePlayback);
 		});
 		hls.on(HlsConstructor.Events.ERROR, (_event, data) => {
@@ -150,36 +146,6 @@
 		hlsInstance = hls;
 	}
 
-	function applyHlsQualitySelection(hls, activeQuality) {
-		if (activeQuality === 'auto') {
-			hls.currentLevel = -1;
-			hls.nextLevel = -1;
-			hls.loadLevel = -1;
-			return;
-		}
-
-		const targetHeight = parseQualityHeight(activeQuality);
-
-		if (!targetHeight) {
-			return;
-		}
-
-		const levelIndex = hls.levels.findIndex((level) => level.height === targetHeight);
-
-		if (levelIndex === -1) {
-			return;
-		}
-
-		hls.currentLevel = levelIndex;
-		hls.nextLevel = levelIndex;
-		hls.loadLevel = levelIndex;
-	}
-
-	function parseQualityHeight(activeQuality) {
-		const match = /^(\d+)p$/i.exec(activeQuality);
-		return match ? Number.parseInt(match[1], 10) : null;
-	}
-
 	function attachNativeSource(sourceUrl, resumeTime, shouldResumePlayback) {
 		videoElement.src = sourceUrl;
 		videoElement.load();
@@ -201,6 +167,16 @@
 			videoElement.canPlayType('application/vnd.apple.mpegurl') ||
 				videoElement.canPlayType('application/x-mpegURL')
 		);
+	}
+
+	function resetVideoElement() {
+		if (!videoElement) {
+			return;
+		}
+
+		videoElement.pause();
+		videoElement.removeAttribute('src');
+		videoElement.load();
 	}
 
 	async function restorePlaybackState(resumeTime, shouldResumePlayback) {

@@ -1045,7 +1045,7 @@ Implementation note for `6a/6b/6c/6d`:
   - native HLS where available
   - HLS.js fallback loaded from CDN for browsers that need JavaScript HLS playback
   - `Auto` quality by loading the master manifest URL
-  - fixed-resolution quality selection by swapping the player source to the selected rendition playlist URL
+  - fixed-resolution quality selection by rebuilding the player against the selected rendition playlist URL so the entire stream follows the locked quality after the swap
 - This design is intentionally aligned with step `7`: once new rendition rows such as `720p` or `1080p` are persisted and the master manifest is expanded, the playback endpoint and player do not need a redesign; they will surface the new options automatically.
 
 - [x] 7a. Implement additional-renditions transcoding pipeline for source-eligible `480p/720p/1080p/1440p/2160p` ABR variants without upscaling.
@@ -1091,7 +1091,7 @@ Implementation note for `9a`:
 - Each transcoder service now receives the full set of rendition queue URLs so a completed baseline worker can publish follow-up rendition jobs to their correct queues instead of reusing only its own consumer queue URL.
 - Transcoder workers now self-heal any misrouted rendition message by re-enqueueing it onto the correct rendition-specific queue and deleting the stale copy from the wrong queue. This prevents old queue state from causing infinite release/retry loops after the queue topology change.
 - The playback page now hides raw internal status terms from end users. The title appears above the player, the video is visible immediately without scrolling, and metadata such as upload time, baseline-ready time, full-processing time, share link, and delete controls live below the player in user-facing language.
-- Manual playback quality selection now forces a real rendition reload: the browser-native path swaps to the selected rendition playlist, while the Hls.js path rebuilds playback from the master manifest and pins the requested level so choosing `720p` or `1080p` actually refetches that quality instead of staying on the earlier Auto-selected buffer.
+- Manual playback quality selection now forces a real rendition reload for both playback engines: choosing `720p` or `1080p` rebuilds just the player against that rendition playlist, preserving playback position when possible and ensuring rewinds or seeks back to the beginning stay on the locked quality until the user returns to `Auto`.
 - The app-host backend deploy script now stages artifacts into temporary files inside `backend/dist` and atomically renames them into place. This avoids Linux `Text file busy` failures when packaging a new release while the previous backend binary is still running from the same path.
 - The transcoder S3 publish path now logs each processed artifact upload with bucket, key, local file path, and file size so baseline stalls can be distinguished between ffmpeg packaging and processed-bucket publication.
 - The transcoder now uploads rendition segments before the variant playlist and retries/times out individual processed-bucket uploads so transient S3 publish failures do not immediately strand a baseline rendition in `PROCESSING_BASELINE` after ffmpeg has already finished.
