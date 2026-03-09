@@ -43,11 +43,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue;
         };
 
-        let ReceivedTranscoderMessageKind::Job(payload) = message.kind else {
-            let ReceivedTranscoderMessageKind::Invalid { reason } = message.kind;
-            queue_consumer.delete(&message.receipt_handle).await?;
-            tracing::warn!(reason = %reason, "transcoder deleted invalid queue message");
-            continue;
+        let payload = match message.kind {
+            ReceivedTranscoderMessageKind::Job(payload) => payload,
+            ReceivedTranscoderMessageKind::Invalid { reason } => {
+                queue_consumer.delete(&message.receipt_handle).await?;
+                tracing::warn!(reason = %reason, "transcoder deleted invalid queue message");
+                continue;
+            }
         };
 
         match runtime.process_job(&payload).await {

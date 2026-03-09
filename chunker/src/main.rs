@@ -44,11 +44,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue;
         };
 
-        let ReceivedChunkerMessageKind::Job(payload) = message.kind else {
-            let ReceivedChunkerMessageKind::Invalid { reason } = message.kind;
-            queue_consumer.delete(&message.receipt_handle).await?;
-            tracing::warn!(reason = %reason, "chunker deleted invalid queue message");
-            continue;
+        let payload = match message.kind {
+            ReceivedChunkerMessageKind::Job(payload) => payload,
+            ReceivedChunkerMessageKind::Invalid { reason } => {
+                queue_consumer.delete(&message.receipt_handle).await?;
+                tracing::warn!(reason = %reason, "chunker deleted invalid queue message");
+                continue;
+            }
         };
 
         match runtime.process_job(payload.processing_job_id).await {
