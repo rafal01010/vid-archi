@@ -314,42 +314,42 @@
 
 <style>
 	.upload-panel {
-		padding: clamp(22px, 4vw, 34px);
+		padding: clamp(18px, 3.2vw, 26px);
 	}
 
 	.upload-copy {
-		margin-bottom: 28px;
+		margin-bottom: 20px;
 	}
 
 	.upload-grid {
 		display: grid;
 		grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
-		gap: 18px;
+		gap: 14px;
 	}
 
 	.form-card,
 	.status-card {
-		padding: 22px;
-		border-radius: 24px;
+		padding: 18px;
+		border-radius: 18px;
 		background: rgba(255, 255, 255, 0.84);
 		border: 1px solid rgba(0, 0, 0, 0.1);
 	}
 
 	.field-spacing {
-		margin-top: 18px;
+		margin-top: 14px;
 	}
 
 	.file-meta {
 		display: grid;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 12px;
-		margin: 18px 0 22px;
+		gap: 10px;
+		margin: 14px 0 18px;
 	}
 
 	.meta-heading,
 	.status-label {
 		margin: 0 0 6px;
-		font-size: 0.8rem;
+		font-size: 0.74rem;
 		font-weight: 700;
 		letter-spacing: 0.04em;
 		text-transform: uppercase;
@@ -365,27 +365,28 @@
 	.actions {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 12px;
+		gap: 10px;
 	}
 
 	.delete-code-copy {
-		margin: 12px 0 22px;
+		margin: 10px 0 18px;
 		color: var(--text-muted);
+		font-size: 0.88rem;
 	}
 
 	.status-card {
 		display: grid;
-		gap: 18px;
+		gap: 14px;
 		align-content: start;
 	}
 
 	.status-block {
 		display: grid;
-		gap: 10px;
+		gap: 8px;
 	}
 
 	.progress-track {
-		height: 14px;
+		height: 10px;
 		border-radius: 999px;
 		background: rgba(17, 18, 20, 0.09);
 		overflow: hidden;
@@ -404,11 +405,12 @@
 		gap: 10px;
 		flex-wrap: wrap;
 		color: var(--text-muted);
+		font-size: 0.84rem;
 	}
 
 	.message {
-		padding: 16px 18px;
-		border-radius: 18px;
+		padding: 14px 16px;
+		border-radius: 16px;
 	}
 
 	.message-error {

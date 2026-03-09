@@ -227,4 +227,12 @@ mod tests {
         assert_eq!(scaled.width, 320);
         assert_eq!(scaled.height, 180);
     }
+
+    #[test]
+    fn compute_scaled_resolution_preserves_portrait_orientation() {
+        let scaled = compute_scaled_resolution(2160, 3840, 3840, 2160).expect("scaled resolution");
+
+        assert_eq!(scaled.width, 1214);
+        assert_eq!(scaled.height, 2160);
+    }
 }

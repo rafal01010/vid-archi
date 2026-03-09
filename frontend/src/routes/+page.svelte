@@ -88,6 +88,6 @@
 <style>
 	.home-page {
 		display: grid;
-		gap: 22px;
+		gap: 16px;
 	}
 </style>

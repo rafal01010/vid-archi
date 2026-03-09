@@ -49,26 +49,25 @@
 			No videos yet. Upload one to get started.
 		</div>
 	{:else}
-		<div class="video-grid">
+		<div class="video-list">
 			{#each videos as video}
-				<article class="video-card">
-					<a class="video-card-link" href={video.playbackPath}>
-						<div class="video-card-top">
-							<span class="meta-text">Uploaded {formatDate(video.createdAt)}</span>
-							<span class="video-status">{describeVideoStatus(video.status)}</span>
+				<article class="video-row">
+					<a class="video-row-link" href={video.playbackPath}>
+						<div class="video-row-copy">
+							<div class="video-row-top">
+								<h3>{video.title || video.originalFilename}</h3>
+								<span class="video-status">{describeVideoStatus(video.status)}</span>
+							</div>
+							<p class="video-row-meta">Uploaded {formatDate(video.createdAt)}</p>
+							<p class="video-row-hint">Open the video page to watch, copy the link, or check processing.</p>
 						</div>
-						<div class="video-card-content">
-							<h3>{video.title || video.originalFilename}</h3>
-							<p class="video-card-copy">Open the video page to watch or check processing progress.</p>
-						</div>
-						<div class="video-card-footer">
-							<span class="meta-text">Watch, copy the link, or check processing</span>
+						<div class="video-row-action">
 							<span class="card-open-button">Open video</span>
 						</div>
 					</a>
 					<DeleteVideoPanel
 						publicId={video.publicId}
-						variant="card"
+						variant="list"
 						on:deleted={handleVideoDeleted}
 					/>
 				</article>
@@ -103,94 +102,101 @@
 
 <style>
 	.library-panel {
-		padding: 28px;
+		padding: 22px;
 	}
 
 	.library-header {
 		display: grid;
-		gap: 10px;
-		margin-bottom: 22px;
-	}
-
-	.library-title {
-		margin: 10px 0 0;
-		font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-		font-size: clamp(1.8rem, 4vw, 2.6rem);
-		line-height: 1;
-	}
-
-	.video-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-		gap: 16px;
+		gap: 8px;
 		margin-bottom: 18px;
 	}
 
-	.video-card {
+	.library-title {
+		margin: 8px 0 0;
+		font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+		font-size: clamp(1.45rem, 3vw, 2.1rem);
+		line-height: 1;
+	}
+
+	.video-list {
 		display: grid;
+		gap: 10px;
+		margin-bottom: 14px;
+	}
+
+	.video-row {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 0;
-		border-radius: 24px;
+		align-items: center;
+		border-radius: 18px;
 		background: rgba(255, 255, 255, 0.84);
 		border: 1px solid rgba(0, 0, 0, 0.1);
 		overflow: hidden;
 		transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 	}
 
-	.video-card:hover {
-		transform: translateY(-2px);
+	.video-row:hover {
+		transform: translateY(-1px);
 		border-color: rgba(17, 18, 20, 0.28);
-		box-shadow: 0 16px 32px rgba(0, 0, 0, 0.12);
+		box-shadow: 0 12px 26px rgba(0, 0, 0, 0.1);
 	}
 
-	.video-card-link {
+	.video-row-link {
 		display: grid;
-		gap: 14px;
-		padding: 20px;
-		min-height: 178px;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 16px;
+		padding: 14px 16px;
+		min-width: 0;
 	}
 
-	.video-card-link:focus-visible {
+	.video-row-link:focus-visible {
 		outline: 2px solid rgba(17, 18, 20, 0.28);
 		outline-offset: -2px;
 	}
 
-	.video-card-top,
-	.video-card-footer {
-		display: flex;
-		justify-content: space-between;
-		gap: 12px;
-		flex-wrap: wrap;
-		align-items: center;
+	.video-row-copy {
+		display: grid;
+		gap: 4px;
+		min-width: 0;
 	}
 
-	.video-card-content {
-		display: grid;
-		gap: 8px;
+	.video-row-top {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
 	}
 
 	h3 {
 		margin: 0;
-		font-size: 1.05rem;
+		font-size: 0.98rem;
+		line-height: 1.25;
 	}
 
-	.video-card-copy {
+	.video-row-meta,
+	.video-row-hint {
 		margin: 0;
 		color: var(--text-muted);
-		font-size: 0.94rem;
 	}
 
-	.video-card-footer {
-		margin-top: auto;
+	.video-row-meta {
+		font-size: 0.82rem;
+	}
+
+	.video-row-hint {
+		font-size: 0.88rem;
 	}
 
 	.video-status {
 		display: inline-flex;
 		align-items: center;
-		padding: 5px 10px;
+		padding: 4px 8px;
 		border-radius: 999px;
 		background: rgba(17, 18, 20, 0.06);
 		color: var(--text-muted);
-		font-size: 0.75rem;
+		font-size: 0.7rem;
 		font-weight: 700;
 		letter-spacing: 0.03em;
 		text-transform: uppercase;
@@ -200,33 +206,44 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 10px 16px;
+		padding: 9px 14px;
 		border-radius: 999px;
 		background: linear-gradient(135deg, #111214 0%, #3a3d42 100%);
 		color: #f7f8fa;
-		font-size: 0.95rem;
+		font-size: 0.88rem;
 		font-weight: 700;
-		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.18);
+		box-shadow: 0 10px 18px rgba(0, 0, 0, 0.16);
 		transition: transform 140ms ease, box-shadow 140ms ease;
 	}
 
-	.video-card:hover .card-open-button,
-	.video-card-link:focus-visible .card-open-button {
+	.video-row:hover .card-open-button,
+	.video-row-link:focus-visible .card-open-button {
 		transform: translateY(-1px);
-		box-shadow: 0 16px 28px rgba(0, 0, 0, 0.22);
+		box-shadow: 0 14px 22px rgba(0, 0, 0, 0.18);
 	}
 
 	.pagination-row {
 		display: flex;
 		justify-content: space-between;
-		gap: 16px;
+		gap: 12px;
 		align-items: center;
 		flex-wrap: wrap;
 	}
 
 	.pagination-actions {
 		display: flex;
-		gap: 10px;
+		gap: 8px;
 		flex-wrap: wrap;
+	}
+
+	@media (max-width: 860px) {
+		.video-row {
+			grid-template-columns: 1fr;
+		}
+
+		.video-row-link {
+			grid-template-columns: 1fr;
+			gap: 12px;
+		}
 	}
 </style>

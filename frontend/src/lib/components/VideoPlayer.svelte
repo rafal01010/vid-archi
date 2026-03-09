@@ -265,10 +265,12 @@
 	}
 
 	.video-frame {
+		display: block;
 		width: 100%;
 		border-radius: 22px;
 		background: #05080d;
 		aspect-ratio: 16 / 9;
+		object-fit: contain;
 	}
 
 	.player-footer {

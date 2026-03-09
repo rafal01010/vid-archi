@@ -13,12 +13,19 @@
 	let errorMessage = '';
 
 	$: isDeleting = deletePhase === 'deleting';
-	$: panelClassName = variant === 'card' ? 'delete-panel card-variant' : 'delete-panel page-variant';
+	$: panelClassName =
+		variant === 'page'
+			? 'delete-panel page-variant'
+			: variant === 'list'
+				? 'delete-panel list-variant'
+				: 'delete-panel card-variant';
 	$: deleteButtonLabel = isDeleting ? 'Deleting...' : 'Delete video';
 	$: toggleButtonLabel = isFormVisible ? 'Cancel' : 'Delete with code';
 	$: helperCopy =
 		variant === 'card'
 			? 'Need to remove this upload? Use the delete code from upload time.'
+			: variant === 'list'
+				? 'Delete later with the upload delete code.'
 			: 'Delete this upload if you still have the delete code from upload time.';
 
 	function handleDeleteToggle() {
@@ -106,6 +113,13 @@
 		background: transparent;
 		border: 0;
 		border-top: 1px solid rgba(0, 0, 0, 0.08);
+	}
+
+	.list-variant {
+		padding: 12px 16px 12px 0;
+		border-radius: 0;
+		background: transparent;
+		border: 0;
 	}
 
 	.delete-summary {
@@ -202,7 +216,8 @@
 
 	@media (max-width: 640px) {
 		.card-variant,
-		.page-variant {
+		.page-variant,
+		.list-variant {
 			padding-inline: 14px;
 		}
 	}
