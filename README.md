@@ -52,6 +52,7 @@ Every API request accepts an optional `x-correlation-id` header. If the client d
 
 The staging host scripts package binaries, build images where needed, and start the services with environment-driven configuration.
 The app-host start scripts now verify that backend/frontend really bind `8080`/`4173`; if startup fails, the deploy exits with recent log output instead of pretending success.
+Each new app-host start attempt truncates `logs/backend.log` and `logs/frontend.log` first, so the log files reflect the current run rather than stale output from an older failed deploy.
 
 For STG app-host redeploys:
 - use `./scripts/stg/deploy-stg-app-host.sh --env-file .env` when backend and frontend both changed

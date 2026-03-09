@@ -95,6 +95,11 @@ find_listening_pid() {
   fi
 }
 
+stop_known_frontend_processes() {
+  pkill -u "$(id -u)" -f "npm run preview" >/dev/null 2>&1 || true
+  pkill -u "$(id -u)" -f "vite preview" >/dev/null 2>&1 || true
+}
+
 stop_port_listener() {
   local port="$1"
   local label="$2"
@@ -107,14 +112,25 @@ stop_port_listener() {
   fi
 
   echo "Stopping ${label} port listener ${listener_pid} on ${port}"
-  kill "${listener_pid}" >/dev/null 2>&1 || true
-  wait "${listener_pid}" 2>/dev/null || true
+  if command -v sudo >/dev/null 2>&1; then
+    sudo kill "${listener_pid}" >/dev/null 2>&1 || true
+  else
+    kill "${listener_pid}" >/dev/null 2>&1 || true
+  fi
   sleep 1
 
   listener_pid="$(find_listening_pid "${port}")"
   if [[ -n "${listener_pid}" ]]; then
-    echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
-    kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    if command -v sudo >/dev/null 2>&1 && command -v fuser >/dev/null 2>&1; then
+      echo "Reclaiming ${label} port ${port} with fuser"
+      sudo fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1; then
+      echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
+      sudo kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    else
+      echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
+      kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    fi
     sleep 1
   fi
 }
@@ -143,7 +159,10 @@ echo "Starting built frontend preview server on http://${HOST}:${PORT}"
 echo "Using PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-<same-origin-relative-with-reverse-proxy>}"
 
 mkdir -p "${LOG_DIR}"
+echo "" >> "${LOG_DIR}/frontend.log"
+echo "=== $(date -Is) frontend start attempt ===" >> "${LOG_DIR}/frontend.log"
 stop_existing_frontend
+stop_known_frontend_processes
 stop_port_listener "${PORT}" "frontend"
 
 if [[ -n "$(find_listening_pid "${PORT}")" ]]; then

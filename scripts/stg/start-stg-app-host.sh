@@ -29,5 +29,8 @@ fi
 
 mkdir -p "${REPO_ROOT}/logs"
 
+echo "Starting app-host backend service"
 "${REPO_ROOT}/backend/scripts/run-stg-api.sh" --env-file "${ENV_FILE}" --background
+echo "Starting app-host frontend service"
 "${REPO_ROOT}/frontend/scripts/run-stg-frontend.sh" --env-file "${ENV_FILE}" --background
+echo "App-host services started successfully"

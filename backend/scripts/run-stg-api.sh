@@ -55,6 +55,8 @@ if [[ -z "${DATABASE_URL}" ]]; then
 fi
 
 mkdir -p "${LOG_DIR}"
+echo "" >> "${LOG_DIR}/backend.log"
+echo "=== $(date -Is) backend start attempt ===" >> "${LOG_DIR}/backend.log"
 
 stop_existing_backend() {
   if [[ ! -f "${PID_FILE}" ]]; then
@@ -89,6 +91,11 @@ find_listening_pid() {
   fi
 }
 
+stop_known_backend_processes() {
+  pkill -u "$(id -u)" -f "${DIST_DIR}/vid-archi-backend" >/dev/null 2>&1 || true
+  pkill -u "$(id -u)" -f "vid-archi-backend" >/dev/null 2>&1 || true
+}
+
 stop_port_listener() {
   local port="$1"
   local label="$2"
@@ -101,14 +108,25 @@ stop_port_listener() {
   fi
 
   echo "Stopping ${label} port listener ${listener_pid} on ${port}"
-  kill "${listener_pid}" >/dev/null 2>&1 || true
-  wait "${listener_pid}" 2>/dev/null || true
+  if command -v sudo >/dev/null 2>&1; then
+    sudo kill "${listener_pid}" >/dev/null 2>&1 || true
+  else
+    kill "${listener_pid}" >/dev/null 2>&1 || true
+  fi
   sleep 1
 
   listener_pid="$(find_listening_pid "${port}")"
   if [[ -n "${listener_pid}" ]]; then
-    echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
-    kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    if command -v sudo >/dev/null 2>&1 && command -v fuser >/dev/null 2>&1; then
+      echo "Reclaiming ${label} port ${port} with fuser"
+      sudo fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1; then
+      echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
+      sudo kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    else
+      echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
+      kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    fi
     sleep 1
   fi
 }
@@ -134,6 +152,7 @@ wait_for_startup() {
 }
 
 stop_existing_backend
+stop_known_backend_processes
 stop_port_listener "${API_PORT:-8080}" "backend"
 
 if [[ -n "$(find_listening_pid "${API_PORT:-8080}")" ]]; then
