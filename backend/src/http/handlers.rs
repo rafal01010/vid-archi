@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::{http::StatusCode, Json};
 use uuid::Uuid;
 
@@ -10,6 +10,7 @@ use crate::http::dto::{
 };
 use crate::http::error::AppResult;
 use crate::http::query::ListVideosQuery;
+use crate::observability::CorrelationId;
 
 pub async fn health_check() -> Json<HealthCheckResponse> {
     Json(HealthCheckResponse { status: "ok" })
@@ -79,11 +80,12 @@ pub async fn sign_upload_parts(
 pub async fn complete_video_upload(
     State(state): State<AppState>,
     Path(video_id): Path<Uuid>,
+    Extension(correlation_id): Extension<CorrelationId>,
     Json(request): Json<CompleteUploadRequest>,
 ) -> AppResult<Json<CompleteUploadResponse>> {
     let response = state
         .upload_service
-        .complete_upload(video_id, request.into())
+        .complete_upload(video_id, request.into(), correlation_id)
         .await?;
 
     Ok(Json(CompleteUploadResponse {

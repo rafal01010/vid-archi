@@ -31,7 +31,8 @@ impl ChunkerRepository {
                     p.id AS job_id,
                     p.video_id,
                     p.attempt,
-                    v.source_s3_key
+                    v.source_s3_key,
+                    p.correlation_id
                 FROM processing_jobs p
                 INNER JOIN videos v
                     ON v.id = p.video_id
@@ -54,7 +55,8 @@ impl ChunkerRepository {
                 p.id AS job_id,
                 p.video_id,
                 candidate.attempt,
-                candidate.source_s3_key
+                candidate.source_s3_key,
+                candidate.correlation_id
             "#,
         )
         .bind(worker_id)
@@ -97,6 +99,7 @@ impl ChunkerRepository {
         &self,
         processing_job_id: Uuid,
         video_id: Uuid,
+        correlation_id: &str,
         source_width: u32,
         source_height: u32,
         baseline_rendition_name: &str,
@@ -128,7 +131,8 @@ impl ChunkerRepository {
                 video_id,
                 rendition,
                 attempt,
-                status
+                status,
+                correlation_id
             )
             VALUES (
                 $1,
@@ -136,7 +140,8 @@ impl ChunkerRepository {
                 $3,
                 $4::video_rendition_name,
                 $5,
-                'QUEUED'::transcoding_job_status
+                'QUEUED'::transcoding_job_status,
+                $6
             )
             ON CONFLICT (video_id, rendition, attempt) DO NOTHING
             "#,
@@ -146,6 +151,7 @@ impl ChunkerRepository {
         .bind(video_id)
         .bind(baseline_rendition_name)
         .bind(attempt)
+        .bind(correlation_id)
         .execute(&mut *transaction)
         .await?;
 
@@ -159,20 +165,23 @@ impl ChunkerRepository {
                     video_id,
                     job_type,
                     attempt,
-                    status
+                    status,
+                    correlation_id
                 )
                 VALUES (
                     $1,
                     $2,
                     'ADDITIONAL_RENDITIONS'::processing_job_type,
                     1,
-                    'QUEUED'::processing_job_status
+                    'QUEUED'::processing_job_status,
+                    $3
                 )
                 ON CONFLICT (video_id, job_type, attempt) DO NOTHING
                 "#,
             )
             .bind(additional_renditions_job_id)
             .bind(video_id)
+            .bind(correlation_id)
             .execute(&mut *transaction)
             .await?;
 
@@ -199,7 +208,8 @@ impl ChunkerRepository {
                         video_id,
                         rendition,
                         attempt,
-                        status
+                        status,
+                        correlation_id
                     )
                     VALUES (
                         $1,
@@ -207,7 +217,8 @@ impl ChunkerRepository {
                         $3,
                         $4::video_rendition_name,
                         1,
-                        'QUEUED'::transcoding_job_status
+                        'QUEUED'::transcoding_job_status,
+                        $5
                     )
                     ON CONFLICT (video_id, rendition, attempt) DO NOTHING
                     "#,
@@ -216,6 +227,7 @@ impl ChunkerRepository {
                 .bind(queued_additional_job_id)
                 .bind(video_id)
                 .bind(rendition_name)
+                .bind(correlation_id)
                 .execute(&mut *transaction)
                 .await?;
             }
@@ -231,6 +243,7 @@ impl ChunkerRepository {
         processing_job_id: Uuid,
         video_id: Uuid,
         attempt: i32,
+        correlation_id: &str,
         error_message: &str,
         max_processing_attempts: i32,
     ) -> AppResult<ChunkerFailureDisposition> {
@@ -261,14 +274,16 @@ impl ChunkerRepository {
                     video_id,
                     job_type,
                     attempt,
-                    status
+                    status,
+                    correlation_id
                 )
                 VALUES (
                     $1,
                     $2,
                     'BASELINE'::processing_job_type,
                     $3,
-                    'QUEUED'::processing_job_status
+                    'QUEUED'::processing_job_status,
+                    $4
                 )
                 ON CONFLICT (video_id, job_type, attempt) DO NOTHING
                 "#,
@@ -276,6 +291,7 @@ impl ChunkerRepository {
             .bind(Uuid::new_v4())
             .bind(video_id)
             .bind(attempt + 1)
+            .bind(correlation_id)
             .execute(&mut *transaction)
             .await?;
 
@@ -340,6 +356,7 @@ pub struct ClaimedBaselineJob {
     pub video_id: Uuid,
     pub attempt: i32,
     pub source_s3_key: String,
+    pub correlation_id: String,
 }
 
 #[derive(Debug)]

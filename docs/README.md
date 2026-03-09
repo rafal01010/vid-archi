@@ -1,15 +1,11 @@
 # Docs
 
-Architecture documentation is a hard requirement for this project, even if implementation remains partial.
+This directory contains the service-level architecture, API contract, and staging operations notes for VidArchi.
 
-This directory will hold:
+Current documents:
+
 - `architecture.md`
 - `api.md`
 - `operational-costs.md`
-- `adr/` records for major design decisions
 
-Documentation rules:
-- cite the files in [references](/Users/dave/LabBase/vid-archi/references)
-- explain how the system reaches `BASELINE_READY`
-- document horizontal scaling, state propagation, and cost tradeoffs
-- keep AWS resource names aligned with Section `20A` in [PROJECT_IMPLEMENTATION_PLAN.md](/Users/dave/LabBase/vid-archi/PROJECT_IMPLEMENTATION_PLAN.md)
+The documents are written to describe the system as an operating web application rather than an implementation exercise. Keep runtime names, endpoints, and staging resource details aligned with the deployed environment.

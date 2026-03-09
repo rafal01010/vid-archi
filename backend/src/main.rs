@@ -3,12 +3,12 @@ mod application;
 mod domain;
 mod http;
 mod infrastructure;
+mod observability;
 
 use std::error::Error;
 use std::net::SocketAddr;
 
 use dotenvy::dotenv;
-use tracing_subscriber::EnvFilter;
 
 use crate::app::{build_router, AppState};
 use crate::application::{UploadService, VideoQueryService};
@@ -16,11 +16,12 @@ use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::AppConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::VideoRepository;
+use crate::observability::init_tracing;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
-    init_tracing();
+    init_tracing("backend");
 
     let config = AppConfig::from_env()?;
     let policy = VideoPolicy::load(&config.video_policy_file).await?;
@@ -44,15 +45,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
     axum::serve(listener, router).await?;
 
     Ok(())
-}
-
-fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .json()
-        .with_current_span(false)
-        .with_span_list(false)
-        .init();
 }

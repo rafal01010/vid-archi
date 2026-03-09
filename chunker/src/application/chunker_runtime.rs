@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::domain::video_policy::VideoPolicy;
@@ -77,6 +78,7 @@ impl ChunkerRuntime {
                     job.job_id,
                     job.video_id,
                     job.attempt,
+                    &job.correlation_id,
                     &error.to_string(),
                     self.config.max_processing_attempts,
                 )
@@ -85,7 +87,17 @@ impl ChunkerRuntime {
             return Ok(map_chunker_failure(&job, failure));
         }
 
-        let outcome = self.process_claimed_job(&job, &processing_directory).await;
+        let job_span = tracing::info_span!(
+            "chunker_job",
+            correlation_id = %job.correlation_id,
+            job_id = %job.job_id,
+            video_id = %job.video_id,
+            attempt = job.attempt
+        );
+        let outcome = self
+            .process_claimed_job(&job, &processing_directory)
+            .instrument(job_span)
+            .await;
         self.cleanup_processing_directory(&processing_directory);
 
         match outcome {
@@ -100,6 +112,7 @@ impl ChunkerRuntime {
                         job.job_id,
                         job.video_id,
                         job.attempt,
+                        &job.correlation_id,
                         &error.to_string(),
                         self.config.max_processing_attempts,
                     )
@@ -115,20 +128,31 @@ impl ChunkerRuntime {
         job: &ClaimedBaselineJob,
         processing_directory: &PathBuf,
     ) -> AppResult<()> {
+        tracing::info!(source_s3_key = %job.source_s3_key, "claimed baseline processing job");
+
         let source_path = processing_directory.join("source").join("original");
         self.object_storage
             .download_source_object(&job.source_s3_key, &source_path)
             .await?;
+        tracing::info!(path = %source_path.display(), "downloaded source object for probing");
 
         let source_metadata = self.source_probe.probe(&source_path).await?;
         let baseline_rendition = self.policy.baseline_rendition_name();
         let additional_renditions = self
             .policy
             .source_eligible_additional_renditions(source_metadata.width, source_metadata.height);
+        tracing::info!(
+            source_width = source_metadata.width,
+            source_height = source_metadata.height,
+            baseline_rendition = %baseline_rendition,
+            additional_rendition_count = additional_renditions.len(),
+            "probed source media and prepared transcoding dispatch"
+        );
         self.repository
             .dispatch_transcoding_jobs(
                 job.job_id,
                 job.video_id,
+                &job.correlation_id,
                 source_metadata.width,
                 source_metadata.height,
                 &baseline_rendition,
@@ -136,6 +160,7 @@ impl ChunkerRuntime {
                 job.attempt,
             )
             .await?;
+        tracing::info!("queued baseline and additional transcoding jobs");
 
         Ok(())
     }

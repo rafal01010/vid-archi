@@ -1,169 +1,131 @@
 # Architecture
 
-This document describes the implemented system shape and the intended scale-out direction for the private video streaming service described in [SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md](/Users/dave/LabBase/vid-archi/references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md), [youtube_system_design_reference.md](/Users/dave/LabBase/vid-archi/references/youtube_system_design_reference.md), and [Youtube-problem-writeup.md](/Users/dave/LabBase/vid-archi/references/Youtube-problem-writeup.md).
+VidArchi separates request handling from media processing so uploads stay lightweight while video packaging scales independently.
 
-## Goals
+## Component Diagram
 
-- anonymous users can upload videos up to `1GB`
-- upload bytes bypass the API and go directly to object storage
-- the first streamable milestone is `BASELINE_READY`
-- the codebase matches the documented split between app host, chunker host, and transcoder host
+```mermaid
+flowchart LR
+    Browser[Browser]
+    Frontend[Frontend]
+    API[Backend API]
+    DB[(Postgres)]
+    Upload[(S3 Upload Bucket)]
+    Processed[(S3 Processed Bucket)]
+    Chunker[Chunker]
+    Transcoder[Transcoder]
+    CDN[CloudFront]
 
-## Implemented Runtime Shape
+    Browser --> Frontend
+    Browser --> API
+    Browser --> Upload
+    API --> DB
+    API --> Upload
+    Chunker --> DB
+    Chunker --> Upload
+    Chunker --> DB
+    Transcoder --> DB
+    Transcoder --> Upload
+    Transcoder --> Processed
+    API --> DB
+    API --> CDN
+    Browser --> CDN
+    CDN --> Processed
+```
+
+## Upload To First Play
+
+```mermaid
+sequenceDiagram
+    participant U as Browser
+    participant A as API
+    participant S as Upload Bucket
+    participant D as Postgres
+    participant C as Chunker
+    participant T as Transcoder
+    participant P as Processed Bucket/CDN
+
+    U->>A: POST /api/videos
+    A->>D: create video + upload session
+    A->>S: create multipart upload
+    A-->>U: upload session + share link
+    U->>A: POST /api/videos/{videoId}/parts/sign
+    A-->>U: presigned part URLs
+    U->>S: multipart PUT parts
+    U->>A: POST /api/videos/{videoId}/complete
+    A->>D: mark UPLOADED + queue BASELINE job
+    C->>D: claim BASELINE job
+    C->>S: download source
+    C->>D: persist source dimensions + queue rendition jobs
+    T->>D: claim 360p job
+    T->>S: download source
+    T->>P: upload 360p playlist, segments, master manifest
+    T->>D: mark BASELINE_READY
+    U->>A: GET /api/videos/{publicId}/playback
+    A-->>U: manifestUrl + available qualities
+```
+
+## Runtime Responsibilities
+
+- `backend`
+  - owns upload session lifecycle, public video lookup, and playback metadata
+  - never proxies video bytes
+- `chunker`
+  - claims parent baseline jobs
+  - probes the source file with `ffprobe`
+  - creates the baseline transcode job and any eligible higher renditions
+- `transcoder`
+  - runs one configured rendition per process
+  - packages HLS artifacts with `ffmpeg`
+  - refreshes `master.m3u8` as renditions finish
+
+## Scaling And Consistency
+
+- Uploads scale with object storage rather than API CPU or memory.
+- API nodes remain stateless because streamability is derived from Postgres, not local memory.
+- Chunkers scale on queued baseline jobs.
+- Transcoders scale by rendition, which allows heavier qualities such as `1080p` or `2160p` to receive more capacity without affecting baseline throughput.
+- `BASELINE_READY` is the first playback milestone. Higher renditions continue in the background under `PROCESSING_FULL`.
+
+## Structured Logging
+
+- All Rust services emit JSON logs through `tracing`.
+- The API accepts or generates `x-correlation-id` and echoes it in every response.
+- `processing_jobs` and `transcoding_jobs` persist `correlation_id`, so chunker and transcoder spans carry the same identifier as the API request that queued the baseline pipeline.
+- Default log level is `INFO`. Set `RUST_LOG=debug` on any service for deeper traces.
+
+## STG Topology
+
+Current staging layout:
+
+- App host
+  - backend API
+  - frontend
+  - Postgres container
+- Chunker host
+  - `chunker` container replicas
+- Transcoder host
+  - one container definition per rendition
+- Shared AWS services
+  - ALB: `stg-api-alb`
+  - CloudFront: `d38ixt0cyn1hi6.cloudfront.net`
+  - Upload bucket: `stg-video-upload-1a`
+  - Processed bucket: `stg-video-processed-1a`
+  - Chunker queue: `stg-chunker-queue`
+  - Transcoder queue: `stg-transcoder-queue`
+
+## Ingress Decision
+
+API Gateway is intentionally omitted from the current staging path. The active ingress path is:
 
 ```text
-Browser
-  -> Rust API on app EC2
-     -> Postgres on app EC2
-     -> upload bucket
-
-Browser
-  -> upload bucket (direct multipart PUT)
-
-Chunker container(s) on processing EC2
-  -> processing_jobs
-  -> upload bucket (download source)
-  -> ffprobe
-  -> transcoding_jobs
-
-Transcoder container(s) on processing EC2
-  -> transcoding_jobs filtered by one configured rendition
-  -> upload bucket (download source)
-  -> ffmpeg
-  -> processed bucket (master manifest, variant playlist, HLS segments)
-
-Browser
-  -> GET /api/videos/{publicId}/playback
-     -> Postgres
-     -> manifestUrl + rendition playlist URLs derived from processed-asset base URL / CDN base URL
+Client -> ALB -> backend API
 ```
 
-## Why It Is Split This Way
+That keeps the environment smaller and cheaper while the service shape is still evolving. The upgrade path is straightforward:
 
-The direct browser-to-object-storage upload path follows the large-blob guidance in the YouTube system design references: the API should coordinate uploads, not proxy video bytes.
-
-The processing side is intentionally split into `chunker` and `transcoder` because that is the scaling story the take-home expects:
-- chunkers can scale horizontally when many uploads complete at once
-- transcoders can scale by resolution
-- heavy renditions such as `2160p` can get more replicas without also scaling `360p`
-
-Docker is part of that story. The runtime YAML lives with the service that uses it so `chunker/` and `transcoder/` can be deployed independently onto separate EC2 instances.
-
-## Upload And Baseline Processing Sequence
-
-1. `POST /api/videos` creates the `videos` row, creates the `upload_sessions` row, and starts a multipart upload in the upload bucket.
-2. `POST /api/videos/{videoId}/parts/sign` returns presigned multipart URLs and moves the video to `UPLOADING` on first use.
-3. `POST /api/videos/{videoId}/complete` finalizes the source upload, sets the video to `UPLOADED`, and inserts a parent `BASELINE` row into `processing_jobs`.
-4. A `chunker` container claims one queued baseline job atomically, marks the parent job `RUNNING`, and moves the video to `PROCESSING_BASELINE`.
-5. The chunker downloads `videos/{video_id}/source/original`, probes source dimensions with `ffprobe`, and commits `source_width/source_height`, the baseline child row in `transcoding_jobs`, and any source-eligible `ADDITIONAL_RENDITIONS` work in one database transaction. That keeps the baseline dispatch idempotent and avoids partial state where a transcoder can run after the chunker has already decided the baseline parent failed.
-6. A `transcoder` container with `TRANSCODER_RENDITION=360p` claims that job, downloads the same source object, runs `ffmpeg` to completion for a VOD package, and writes:
-   - `videos/{video_id}/hls/master.m3u8`
-   - `videos/{video_id}/hls/360p/360p.m3u8`
-   - `videos/{video_id}/hls/360p/segment_*.ts`
-7. After the full `360p` playlist and all of its segments are uploaded to the processed bucket, the transcoder marks the `360p` rendition `READY`, stores `videos.manifest_s3_key`, sets `is_streamable=true`, transitions the video to `BASELINE_READY` or directly to `READY` when no higher renditions are planned, and marks the parent baseline job `SUCCEEDED`.
-8. Higher-rendition transcoders claim their queued rows only after the video is already streamable. The first additional-renditions claim moves the video to `PROCESSING_FULL`.
-9. Every successful rendition rebuilds `videos/{video_id}/hls/master.m3u8` from the current set of ready renditions so `Auto` playback and fixed-quality playback stay aligned.
-10. The last source-eligible additional rendition moves the video to `READY` and marks the `ADDITIONAL_RENDITIONS` parent job `SUCCEEDED`.
-11. `GET /api/videos/{publicId}/playback` returns:
-   - `manifestUrl` for `Auto` adaptive bitrate playback from the master manifest
-   - one `playlistUrl` per ready rendition for fixed-resolution playback such as `360p` or `1080p`
-   - actual encoded rendition dimensions from `video_renditions`, so source-capped variants remain accurate in the UI
-   - a polling interval so the share page can keep discovering new qualities while processing continues
-
-## State And Queue Guardrails
-
-The current guardrails live in Postgres:
-- `processing_jobs` holds the parent baseline job lifecycle
-- `transcoding_jobs` holds per-rendition work items
-- chunkers and transcoders claim rows with atomic `RUNNING` transitions
-- chunker dispatch now writes source dimensions plus child-job fanout atomically, so retries cannot leave a half-dispatched baseline pipeline behind
-- retries create new attempt rows instead of mutating finished attempts back to `QUEUED`
-- `BASELINE_READY` is written only after the full baseline VOD package exists
-- the share-page response reads streamability from shared DB metadata, not local process state
-- user-visible failure text comes from sanitized `videos.error_message`, while raw worker failure text stays in `processing_jobs.error` and `transcoding_jobs.error`
-
-That matches the consistency requirements in the exam references and keeps the current implementation compatible with a later SQS-driven version.
-
-## Failure And Retry Policy
-
-The current `8a/8b` behavior is intentionally simple and explicit:
-- `chunker` retries failed baseline dispatch work up to `CHUNKER_MAX_PROCESSING_ATTEMPTS` by inserting a new `processing_jobs` attempt and moving the video back to `UPLOADED`
-- `transcoder` retries failed rendition work up to `TRANSCODER_MAX_ATTEMPTS` by inserting a new `transcoding_jobs` attempt under the same parent processing job
-- retries are idempotent because each retry attempt is represented as a new `(video_id, job_type|rendition, attempt)` row guarded by unique indexes
-- baseline failures that exhaust retries move the video to `FAILED` with `is_streamable=false`
-- additional-rendition failures that exhaust retries after baseline availability also move the video to `FAILED`, but keep `is_streamable=true` and retain the existing master manifest so the baseline stream can still play
-- baseline retry attempts now create the child `360p` transcoding row with the matching retry attempt number, which avoids the unique-key collision that would otherwise suppress the retried baseline job
-
-That last choice is deliberate: time-to-stream is the primary requirement, so a post-baseline processing failure should not remove already published playback artifacts.
-
-## Abandoned Multipart Cleanup
-
-The upload path now includes an operational cleanup policy for abandoned multipart uploads:
-- the default policy aborts incomplete multipart uploads after `1` day, which matches the cost-control guidance in the S3 reference material and keeps abandoned browser uploads from accumulating request/storage waste
-
-This is the lowest-risk cleanup path for the take-home because it works directly at the S3 bucket level and does not depend on an extra always-on scheduler service.
-
-## Dockerized Service Folders
-
-[chunker/docker-compose.yml](/Users/dave/LabBase/vid-archi/chunker/docker-compose.yml) defines:
-- `chunker`
-
-[transcoder/docker-compose.yml](/Users/dave/LabBase/vid-archi/transcoder/docker-compose.yml) defines:
-- `transcoder-360p`
-- `transcoder-480p`
-- `transcoder-720p`
-- `transcoder-1080p`
-- `transcoder-1440p`
-- `transcoder-2160p`
-
-Scaling examples:
-
-```bash
-docker compose -f chunker/docker-compose.yml up -d chunker
+```text
+Client -> API Gateway -> ALB -> backend API
 ```
 
-```bash
-docker compose -f transcoder/docker-compose.yml up -d \
-  --scale transcoder-360p=3 \
-  --scale transcoder-2160p=2 \
-  transcoder-360p transcoder-2160p
-```
-
-This is how the system simulates autoscaling while keeping each service folder self-contained.
-
-## Deployment Story
-
-App host:
-- Rust API
-- Svelte frontend
-- Postgres container
-
-Chunker host:
-- Docker engine
-- built `chunker` image
-- compose-managed chunker containers
-
-Transcoder host:
-- Docker engine
-- built `transcoder` image
-- compose-managed transcoder containers
-
-The deploy scripts are split accordingly:
-- [deploy-stg-app-host.sh](/Users/dave/LabBase/vid-archi/scripts/stg/deploy-stg-app-host.sh)
-- [start-stg-app-host.sh](/Users/dave/LabBase/vid-archi/scripts/stg/start-stg-app-host.sh)
-- [deploy-stg-chunker-host.sh](/Users/dave/LabBase/vid-archi/scripts/stg/deploy-stg-chunker-host.sh)
-- [start-stg-chunker-host.sh](/Users/dave/LabBase/vid-archi/scripts/stg/start-stg-chunker-host.sh)
-- [deploy-stg-transcoder-host.sh](/Users/dave/LabBase/vid-archi/scripts/stg/deploy-stg-transcoder-host.sh)
-- [start-stg-transcoder-host.sh](/Users/dave/LabBase/vid-archi/scripts/stg/start-stg-transcoder-host.sh)
-
-## Current Boundary
-
-What is implemented now:
-- baseline `360p` flow through chunker plus transcoder
-- master manifest generation and safe expansion as higher renditions finish
-- dedicated playback endpoint that exposes the master manifest plus ready rendition playlists
-- browser playback page with polling, native HLS support, and HLS.js fallback
-- quality switching design:
-  - `Auto` loads the master manifest and leaves rendition choice to the HLS player
-  - fixed quality loads the selected variant playlist directly so only that resolution is fetched
-- source-capped higher-rendition flow from `BASELINE_READY` to `PROCESSING_FULL` to `READY`
+API Gateway becomes useful when the service needs centralized auth, throttling, request validation, or a stricter public API management layer.

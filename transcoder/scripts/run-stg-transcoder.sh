@@ -62,6 +62,7 @@ fi
 
 export DATABASE_URL="${STG_DATABASE_URL:-${DATABASE_URL:-}}"
 export TRANSCODER_RENDITION="${RENDITION}"
+export RUST_LOG="${RUST_LOG:-info}"
 
 if [[ -z "${DATABASE_URL}" ]]; then
   echo "DATABASE_URL is not set. Provide STG_DATABASE_URL or DATABASE_URL in the env file."
@@ -77,7 +78,7 @@ fi
 if [[ "${BACKGROUND}" == "1" ]]; then
   local_log_file="${LOG_DIR}/transcoder-${INSTANCE_LABEL}.log"
   local_pid_file="${LOG_DIR}/transcoder-${INSTANCE_LABEL}.pid"
-  echo "Starting transcoder ${INSTANCE_LABEL} in background"
+  echo "Starting transcoder ${INSTANCE_LABEL} in background with RUST_LOG=${RUST_LOG}"
   nohup "${DIST_DIR}/vid-archi-transcoder" > "${local_log_file}" 2>&1 &
   echo $! > "${local_pid_file}"
   echo "Transcoder PID $(cat "${local_pid_file}")"

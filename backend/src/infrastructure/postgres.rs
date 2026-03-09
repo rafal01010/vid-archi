@@ -229,6 +229,7 @@ impl VideoRepository {
         &self,
         video_id: Uuid,
         upload_session_id: Uuid,
+        correlation_id: &str,
     ) -> AppResult<FinalizedUploadRecord> {
         let mut transaction = self.pool.begin().await?;
 
@@ -281,14 +282,23 @@ impl VideoRepository {
                 video_id,
                 job_type,
                 attempt,
-                status
+                status,
+                correlation_id
             )
-            VALUES ($1, $2, 'BASELINE'::processing_job_type, 1, 'QUEUED'::processing_job_status)
+            VALUES (
+                $1,
+                $2,
+                'BASELINE'::processing_job_type,
+                1,
+                'QUEUED'::processing_job_status,
+                $3
+            )
             ON CONFLICT (video_id, job_type, attempt) DO NOTHING
             "#,
         )
         .bind(processing_job_id)
         .bind(video_id)
+        .bind(correlation_id)
         .execute(&mut *transaction)
         .await?;
 

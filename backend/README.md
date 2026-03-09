@@ -103,3 +103,10 @@ Package the backend with:
 ```bash
 ./backend/scripts/deploy-backend.sh --run-tests
 ```
+
+## Logging
+
+- logs are emitted as structured JSON
+- default level is `INFO`
+- set `RUST_LOG=debug` before starting the service for deeper traces
+- `x-correlation-id` is accepted on API requests and echoed back in the response

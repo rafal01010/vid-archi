@@ -11,8 +11,13 @@ Responsibilities:
 - enqueue per-rendition rows in `transcoding_jobs`
 
 Current implemented behavior:
-- step `5a` through `5d` uses the chunker to dispatch the baseline `360p` transcoding job
-- step `7a` now also uses the chunker to queue an `ADDITIONAL_RENDITIONS` parent job plus source-eligible higher renditions
+- the chunker dispatches the baseline `360p` transcoding job first
+- it also queues an `ADDITIONAL_RENDITIONS` parent job plus any source-eligible higher renditions
+
+Logging behavior:
+- logs are emitted as structured JSON
+- default level is `INFO`
+- each claimed job runs inside a span that includes `correlation_id`, `job_id`, `video_id`, and `attempt`
 
 Useful commands:
 

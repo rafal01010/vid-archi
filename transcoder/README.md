@@ -15,7 +15,12 @@ Responsibilities:
 Container model:
 - one Docker service definition exists per rendition
 - you can scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently
-- that is how the project simulates autoscaling pressure by resolution
+- that is how the service scales packaging pressure by resolution
+
+Logging behavior:
+- logs are emitted as structured JSON
+- default level is `INFO`
+- each claimed job runs inside a span that includes `correlation_id`, `processing_job_id`, `transcoding_job_id`, `video_id`, and `rendition`
 
 Useful commands:
 

@@ -14,6 +14,7 @@ use crate::infrastructure::postgres::{
     CreateUploadSessionRecord, CreateVideoRecord, FinalizedUploadRecord, UploadSessionContext,
     VideoRepository,
 };
+use crate::observability::CorrelationId;
 
 #[derive(Clone)]
 pub struct UploadService {
@@ -129,6 +130,15 @@ impl UploadService {
             return Err(error);
         }
 
+        tracing::info!(
+            %video_id,
+            %public_id,
+            %upload_session_id,
+            size_bytes = command.size_bytes,
+            content_type = %normalized_content_type,
+            "created video upload session"
+        );
+
         Ok(CreateVideoUploadResult {
             video_id,
             public_id: public_id.clone(),
@@ -165,6 +175,13 @@ impl UploadService {
             )
             .await?;
 
+        tracing::info!(
+            %video_id,
+            upload_session_id = %upload_session.upload_session_id,
+            part_count = signed_parts.len(),
+            "signed multipart upload parts"
+        );
+
         Ok(SignUploadPartsResult {
             video_id,
             upload_session_id: upload_session.upload_session_id,
@@ -177,6 +194,7 @@ impl UploadService {
         &self,
         video_id: Uuid,
         command: CompleteUploadCommand,
+        correlation_id: CorrelationId,
     ) -> AppResult<CompleteUploadResult> {
         let upload_session = self
             .get_upload_session(video_id, command.upload_session_id)
@@ -223,8 +241,21 @@ impl UploadService {
 
         let finalized_upload = self
             .repository
-            .finalize_completed_upload(video_id, command.upload_session_id)
+            .finalize_completed_upload(
+                video_id,
+                command.upload_session_id,
+                correlation_id.as_str(),
+            )
             .await?;
+
+        tracing::info!(
+            %video_id,
+            public_id = %finalized_upload.public_id,
+            upload_session_id = %command.upload_session_id,
+            processing_job_id = %finalized_upload.processing_job_id,
+            correlation_id = correlation_id.as_str(),
+            "completed multipart upload and queued baseline processing"
+        );
 
         Ok(map_finalized_upload(finalized_upload))
     }

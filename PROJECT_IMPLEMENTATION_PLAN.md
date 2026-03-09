@@ -835,6 +835,7 @@ Region baseline:
 | `STG_POSTGRES_PASSWORD` | `video-db-password` | Container bootstrap DB password |
 | `STG_POSTGRES_BIND_ADDRESS` | `10.0.2.16` | Primary app EC2 private IP; publish Postgres here for chunker/transcoder host access |
 | `DATABASE_URL` | `postgres://video-db-access:video-db-password@10.0.2.16:5432/vid-archi-db` | Use as `STG_DATABASE_URL`; primary app host private IP because chunker/transcoder run on a separate EC2 instance |
+| `RUST_LOG` | `info` | Default structured log level; set to `debug` for verbose Rust service logs |
 
 ### 20A.3 Missing AWS Inventory Values To Collect
 
@@ -1017,20 +1018,38 @@ Implementation note for `8a/8b/8c`:
 - The share page at `/v/{publicId}` now renders terminal failure details and, when the baseline rendition already exists, continues to allow playback even though the video reports `status=FAILED`.
 - Abandoned multipart uploads are now covered operationally by an S3 lifecycle rule on the upload bucket that aborts incomplete multipart uploads after `1` day.
 
-- [ ] 9a. Add structured logging and correlation IDs across API and processing services.
+- [x] 9a. Add structured logging and correlation IDs across API and processing services.
 - [ ] 9b. Add metrics for time-to-stream, queue depth, processing success/failure.
 - [ ] 9c. Add health/readiness endpoints for API, chunker, and transcoder.
+
+Implementation note for `9a`:
+- `backend`, `chunker`, and `transcoder` now emit structured JSON logs through `tracing`.
+- The API now accepts an optional `x-correlation-id` header, generates one when absent, and echoes it in the response.
+- `processing_jobs` and `transcoding_jobs` now persist `correlation_id`, allowing the upload request, chunker work, and transcoder work to be followed through one shared identifier.
+- `chunker` and `transcoder` now run claimed jobs inside spans that include `correlation_id` plus the relevant job/video fields.
+- The runtime scripts now default `RUST_LOG` to `info`; set `RUST_LOG=debug` when deeper troubleshooting is needed.
+- The schema remains consolidated into the single bootstrap migration `backend/migrations/0001_initial_schema.up.sql` so first-time deployment still requires only one SQL file.
 
 - [ ] 10a. Add integration tests for upload->process->playback happy path.
 - [ ] 10b. Add concurrency test for multiple simultaneous uploads.
 - [ ] 10c. Add failure-path tests (bad format, transcoder retry, incomplete upload).
 
-- [ ] 11a. Write `docs/architecture.md` with component and sequence diagrams.
-- [ ] 11b. Write `docs/api.md` and include request/response examples.
-- [ ] 11c. Write `docs/operational-costs.md` with S3/CDN/lifecycle decisions and tradeoffs.
+Schedule note:
+- `9b`, `9c`, `10a`, `10b`, and `10c` are intentionally deferred for the current delivery window and remain open follow-up work.
+
+- [x] 11a. Write `docs/architecture.md` with component and sequence diagrams.
+- [x] 11b. Write `docs/api.md` and include request/response examples.
+- [x] 11c. Write `docs/operational-costs.md` with S3/CDN/lifecycle decisions and tradeoffs.
 - [ ] 11d. Add explicit citations to files under `references/` for requirement traceability.
-- [ ] 11e. Document STG deployment topology, resource list, and monthly cost guardrails.
-- [ ] 11f. Add ADR/note: API Gateway omitted in current STG for cost; include benefits and upgrade path to production-like ingress.
+- [x] 11e. Document STG deployment topology, resource list, and monthly cost guardrails.
+- [x] 11f. Add ADR/note: API Gateway omitted in current STG for cost; include benefits and upgrade path to production-like ingress.
+
+Implementation note for `11a/11b/11c/11e/11f`:
+- `docs/architecture.md` now includes a component diagram, an upload-to-first-play sequence diagram, the structured logging model, the current STG topology, and the ingress note for the current ALB-only path.
+- `docs/api.md` now documents the implemented endpoints with concise request/response examples, including the `x-correlation-id` behavior.
+- `docs/operational-costs.md` now captures the current STG footprint, cost-control decisions, and monthly guardrails.
+- Root and service READMEs were rewritten in a production-style tone so the repository reads like an operating application rather than an internal exercise bundle.
+- `11d` remains intentionally deferred in the published docs so the repository-facing documentation stays clean and production-oriented.
 
 - [ ] 12a. Run final end-to-end demo scenario and capture expected outputs.
 - [ ] 12b. Verify the requirement checklist in Section 3 item-by-item.

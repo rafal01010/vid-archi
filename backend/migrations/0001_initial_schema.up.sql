@@ -316,6 +316,7 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
   job_type processing_job_type NOT NULL,
   attempt INTEGER NOT NULL,
   status processing_job_status NOT NULL DEFAULT 'QUEUED',
+  correlation_id TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   worker_id TEXT,
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
@@ -354,6 +355,9 @@ CREATE INDEX IF NOT EXISTS processing_jobs_status_idx
 CREATE INDEX IF NOT EXISTS processing_jobs_created_at_idx
   ON processing_jobs (created_at DESC);
 
+CREATE INDEX IF NOT EXISTS processing_jobs_correlation_id_idx
+  ON processing_jobs (correlation_id);
+
 CREATE TABLE IF NOT EXISTS transcoding_jobs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   processing_job_id UUID NOT NULL REFERENCES processing_jobs (id) ON DELETE CASCADE,
@@ -361,6 +365,7 @@ CREATE TABLE IF NOT EXISTS transcoding_jobs (
   rendition video_rendition_name NOT NULL,
   attempt INTEGER NOT NULL DEFAULT 1,
   status transcoding_job_status NOT NULL DEFAULT 'QUEUED',
+  correlation_id TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   worker_id TEXT,
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
@@ -401,6 +406,9 @@ CREATE INDEX IF NOT EXISTS transcoding_jobs_status_idx
 
 CREATE INDEX IF NOT EXISTS transcoding_jobs_rendition_status_idx
   ON transcoding_jobs (rendition, status, created_at);
+
+CREATE INDEX IF NOT EXISTS transcoding_jobs_correlation_id_idx
+  ON transcoding_jobs (correlation_id);
 
 DROP TRIGGER IF EXISTS videos_set_updated_at ON videos;
 CREATE TRIGGER videos_set_updated_at

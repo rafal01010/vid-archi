@@ -3,13 +3,13 @@ mod domain;
 mod error;
 mod infrastructure;
 mod media;
+mod observability;
 
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dotenvy::dotenv;
-use tracing_subscriber::EnvFilter;
 
 use crate::application::{ChunkerProcessOutcome, ChunkerRuntime};
 use crate::domain::video_policy::VideoPolicy;
@@ -17,11 +17,12 @@ use crate::infrastructure::config::ChunkerConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::ChunkerRepository;
 use crate::media::SourceProbe;
+use crate::observability::init_tracing;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
-    init_tracing();
+    init_tracing("chunker");
 
     let config = ChunkerConfig::from_env()?;
     let poll_interval = Duration::from_secs(config.poll_interval_seconds);
@@ -55,15 +56,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-}
-
-fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .json()
-        .with_current_span(false)
-        .with_span_list(false)
-        .init();
 }

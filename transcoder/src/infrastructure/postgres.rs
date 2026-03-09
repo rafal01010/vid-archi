@@ -52,7 +52,8 @@ impl TranscoderRepository {
                     tj.rendition::text AS rendition,
                     v.source_s3_key,
                     v.source_width,
-                    v.source_height
+                    v.source_height,
+                    tj.correlation_id
                 FROM transcoding_jobs tj
                 INNER JOIN videos v
                     ON v.id = tj.video_id
@@ -83,7 +84,8 @@ impl TranscoderRepository {
                 candidate.rendition,
                 candidate.source_s3_key,
                 candidate.source_width,
-                candidate.source_height
+                candidate.source_height,
+                candidate.correlation_id
             "#,
         )
         .bind(worker_id)
@@ -114,7 +116,8 @@ impl TranscoderRepository {
                     tj.rendition::text AS rendition,
                     v.source_s3_key,
                     v.source_width,
-                    v.source_height
+                    v.source_height,
+                    tj.correlation_id
                 FROM transcoding_jobs tj
                 INNER JOIN videos v
                     ON v.id = tj.video_id
@@ -145,7 +148,8 @@ impl TranscoderRepository {
                 candidate.rendition,
                 candidate.source_s3_key,
                 candidate.source_width,
-                candidate.source_height
+                candidate.source_height,
+                candidate.correlation_id
             "#,
         )
         .bind(worker_id)
@@ -489,6 +493,7 @@ impl TranscoderRepository {
         error_message: &str,
         max_transcoding_attempts: i32,
         is_baseline_rendition: bool,
+        correlation_id: &str,
     ) -> AppResult<TranscodingFailureDisposition> {
         let mut transaction = self.pool.begin().await?;
         let truncated_error = truncate_error_message(error_message);
@@ -532,7 +537,8 @@ impl TranscoderRepository {
                     video_id,
                     rendition,
                     attempt,
-                    status
+                    status,
+                    correlation_id
                 )
                 VALUES (
                     $1,
@@ -540,7 +546,8 @@ impl TranscoderRepository {
                     $3,
                     $4::video_rendition_name,
                     $5,
-                    'QUEUED'::transcoding_job_status
+                    'QUEUED'::transcoding_job_status,
+                    $6
                 )
                 ON CONFLICT (video_id, rendition, attempt) DO NOTHING
                 "#,
@@ -550,6 +557,7 @@ impl TranscoderRepository {
             .bind(video_id)
             .bind(rendition_name)
             .bind(attempt + 1)
+            .bind(correlation_id)
             .execute(&mut *transaction)
             .await?;
 
@@ -658,6 +666,7 @@ pub struct ClaimedTranscodingJob {
     pub source_s3_key: String,
     pub source_width: Option<i32>,
     pub source_height: Option<i32>,
+    pub correlation_id: String,
 }
 
 #[derive(Debug)]

@@ -46,6 +46,7 @@ if [[ ! -x "${DIST_DIR}/vid-archi-chunker" ]]; then
 fi
 
 export DATABASE_URL="${STG_DATABASE_URL:-${DATABASE_URL:-}}"
+export RUST_LOG="${RUST_LOG:-info}"
 
 if [[ -z "${DATABASE_URL}" ]]; then
   echo "DATABASE_URL is not set. Provide STG_DATABASE_URL or DATABASE_URL in the env file."
@@ -55,7 +56,7 @@ fi
 mkdir -p "${LOG_DIR}"
 
 if [[ "${BACKGROUND}" == "1" ]]; then
-  echo "Starting chunker in background"
+  echo "Starting chunker in background with RUST_LOG=${RUST_LOG}"
   nohup "${DIST_DIR}/vid-archi-chunker" > "${LOG_DIR}/chunker.log" 2>&1 &
   echo $! > "${LOG_DIR}/chunker.pid"
   echo "Chunker PID $(cat "${LOG_DIR}/chunker.pid")"

@@ -1,12 +1,20 @@
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::http::Request;
+use axum::middleware;
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing::Level;
 
 use crate::application::{UploadService, VideoQueryService};
 use crate::http::handlers;
 use crate::infrastructure::config::AppConfig;
+use crate::observability::{
+    correlation_id_middleware, log_request_failure, log_request_finish, log_request_start,
+    parse_header_value, CORRELATION_ID_HEADER,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -58,6 +66,27 @@ pub fn build_router(state: AppState) -> Router {
                 .allow_headers(Any)
                 .allow_methods(Any),
         )
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    let correlation_id = request
+                        .headers()
+                        .get(CORRELATION_ID_HEADER)
+                        .and_then(parse_header_value)
+                        .unwrap_or_else(|| "missing".to_owned());
+
+                    tracing::span!(
+                        Level::INFO,
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        correlation_id = %correlation_id
+                    )
+                })
+                .on_request(log_request_start)
+                .on_response(log_request_finish)
+                .on_failure(log_request_failure),
+        )
+        .layer(middleware::from_fn(correlation_id_middleware))
         .with_state(state)
 }

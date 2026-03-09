@@ -29,7 +29,7 @@ Avoid inventing alternate UI-only status names when the backend already has a pr
 - `/` renders the upload form and the recent-upload library in one page.
 - The homepage defaults to 10 videos per page and exposes previous/next controls when older uploads exist.
 - The upload form performs:
-  - file size validation against the 1GB project limit
+  - file size validation against the current 1GB service limit
   - file type validation for MP4, MOV, WebM, and AVI
   - direct multipart uploads from the browser to S3/MinIO using presigned `PUT` URLs
   - progress reporting during part uploads

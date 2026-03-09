@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracing::Instrument;
+
 use crate::domain::video_policy::VideoPolicy;
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::config::TranscoderConfig;
@@ -93,13 +95,26 @@ impl TranscoderRuntime {
                     &error.to_string(),
                     self.config.max_transcoding_attempts,
                     self.policy.is_baseline_rendition(&job.rendition),
+                    &job.correlation_id,
                 )
                 .await?;
             self.cleanup_processing_directory(&processing_directory);
             return Ok(map_transcoding_failure(&job, failure));
         }
 
-        let outcome = self.process_claimed_job(&job, &processing_directory).await;
+        let job_span = tracing::info_span!(
+            "transcoder_job",
+            correlation_id = %job.correlation_id,
+            transcoding_job_id = %job.transcoding_job_id,
+            processing_job_id = %job.processing_job_id,
+            video_id = %job.video_id,
+            rendition = %job.rendition,
+            attempt = job.attempt
+        );
+        let outcome = self
+            .process_claimed_job(&job, &processing_directory)
+            .instrument(job_span)
+            .await;
         self.cleanup_processing_directory(&processing_directory);
 
         match outcome {
@@ -120,6 +135,7 @@ impl TranscoderRuntime {
                         &error.to_string(),
                         self.config.max_transcoding_attempts,
                         self.policy.is_baseline_rendition(&job.rendition),
+                        &job.correlation_id,
                     )
                     .await?;
                 tracing::warn!(
@@ -140,6 +156,8 @@ impl TranscoderRuntime {
         job: &ClaimedTranscodingJob,
         processing_directory: &PathBuf,
     ) -> AppResult<()> {
+        tracing::info!(source_s3_key = %job.source_s3_key, "claimed transcoding job");
+
         let source_width = job.source_width.ok_or_else(|| {
             AppError::conflict("source width is missing; chunker must persist it first")
         })?;
@@ -157,6 +175,12 @@ impl TranscoderRuntime {
         self.object_storage
             .download_source_object(&job.source_s3_key, &source_path)
             .await?;
+        tracing::info!(
+            path = %source_path.display(),
+            source_width,
+            source_height,
+            "downloaded source object for transcoding"
+        );
 
         let packaged = self
             .media_processor
@@ -168,6 +192,13 @@ impl TranscoderRuntime {
                 source_height as u32,
             )
             .await?;
+        tracing::info!(
+            rendition = %job.rendition,
+            output_width = packaged.output_width,
+            output_height = packaged.output_height,
+            segment_count = packaged.segment_count,
+            "packaged HLS rendition"
+        );
 
         self.repository
             .mark_rendition_processing(
@@ -192,6 +223,7 @@ impl TranscoderRuntime {
                 &processing_directory.join("hls").join(&job.rendition),
             )
             .await?;
+        tracing::info!("uploaded rendition artifacts to processed storage");
 
         let mut completion_session = self
             .repository
@@ -216,6 +248,7 @@ impl TranscoderRuntime {
                     &processing_directory.join("hls").join("master.m3u8"),
                 )
                 .await?;
+            tracing::info!(master_manifest_key = %master_manifest_key, "uploaded refreshed master manifest");
 
             let video_progress = self.determine_video_progress_update(
                 job,
