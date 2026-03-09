@@ -45,9 +45,33 @@ echo "Building release binary"
 cargo build --release --manifest-path backend/Cargo.toml
 
 mkdir -p "${OUTPUT_DIR}"
-cp "${REPO_ROOT}/backend/target/release/vid-archi-backend" "${OUTPUT_DIR}/vid-archi-backend"
-cp "${REPO_ROOT}/config/video_policy.json" "${OUTPUT_DIR}/video_policy.json"
-cp "${REPO_ROOT}/.env.example" "${OUTPUT_DIR}/.env.example"
+
+install_atomic_file() {
+  local source_path="$1"
+  local target_path="$2"
+  local mode="$3"
+  local target_dir
+  local temp_path
+
+  target_dir="$(dirname "${target_path}")"
+  mkdir -p "${target_dir}"
+  temp_path="$(mktemp "${target_dir}/.$(basename "${target_path}").XXXXXX")"
+  install -m "${mode}" "${source_path}" "${temp_path}"
+  mv -f "${temp_path}" "${target_path}"
+}
+
+install_atomic_file \
+  "${REPO_ROOT}/backend/target/release/vid-archi-backend" \
+  "${OUTPUT_DIR}/vid-archi-backend" \
+  755
+install_atomic_file \
+  "${REPO_ROOT}/config/video_policy.json" \
+  "${OUTPUT_DIR}/video_policy.json" \
+  644
+install_atomic_file \
+  "${REPO_ROOT}/.env.example" \
+  "${OUTPUT_DIR}/.env.example" \
+  644
 
 echo "Backend artifacts prepared in ${OUTPUT_DIR}"
 echo "Use --run-tests when you want deployment to fail fast before packaging."
