@@ -16,8 +16,15 @@
 	$: if (!qualityChoices.some((choice) => choice.value === selectedQuality)) {
 		selectedQuality = qualityChoices[0]?.value ?? 'auto';
 	}
-	$: if (videoElement) {
-		void syncPlayerSource();
+	$: {
+		const hasMountedPlayer = Boolean(videoElement);
+		const activeManifestUrl = manifestUrl;
+		const availableQualityOptions = qualityOptions;
+		const activeQuality = selectedQuality;
+
+		if (hasMountedPlayer) {
+			void syncPlayerSource(activeManifestUrl, availableQualityOptions, activeQuality);
+		}
 	}
 
 	onDestroy(() => {
@@ -52,9 +59,13 @@
 		return options.find((option) => option.name === activeQuality)?.playlistUrl ?? activeManifestUrl ?? '';
 	}
 
-	async function syncPlayerSource() {
+	async function syncPlayerSource(activeManifestUrl, availableQualityOptions, activeQuality) {
 		const useNativeHls = supportsNativeHls();
-		const sourceUrl = resolvePlaybackSource(manifestUrl, qualityOptions, selectedQuality);
+		const sourceUrl = resolvePlaybackSource(
+			activeManifestUrl,
+			availableQualityOptions,
+			activeQuality
+		);
 		const attachmentKey = buildAttachmentKey(sourceUrl, useNativeHls);
 
 		if (!sourceUrl) {
