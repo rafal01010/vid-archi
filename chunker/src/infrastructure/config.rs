@@ -15,6 +15,7 @@ pub struct ChunkerConfig {
     pub s3_secret_access_key: Option<String>,
     pub chunker_id: String,
     pub poll_interval_seconds: u64,
+    pub max_processing_attempts: i32,
     pub chunker_temp_dir: PathBuf,
     pub ffprobe_binary: String,
 }
@@ -55,6 +56,8 @@ impl ChunkerConfig {
                 format!("chunker-{hostname}-{}", std::process::id())
             });
         let poll_interval_seconds = read_env_with_default("CHUNKER_POLL_INTERVAL_SECONDS", 5u64)?;
+        let max_processing_attempts =
+            read_env_with_default("CHUNKER_MAX_PROCESSING_ATTEMPTS", 3i32)?;
         let chunker_temp_dir = env::var("CHUNKER_TEMP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp/vid-archi-chunker"));
@@ -71,6 +74,7 @@ impl ChunkerConfig {
             s3_secret_access_key,
             chunker_id,
             poll_interval_seconds,
+            max_processing_attempts,
             chunker_temp_dir,
             ffprobe_binary,
         })

@@ -36,6 +36,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(ChunkerProcessOutcome::Dispatched { job_id, video_id }) => {
                 tracing::info!(%job_id, %video_id, "chunker dispatched baseline transcoder job");
             }
+            Ok(ChunkerProcessOutcome::RetryQueued {
+                job_id,
+                video_id,
+                next_attempt,
+            }) => {
+                tracing::warn!(%job_id, %video_id, %next_attempt, "chunker failure scheduled a retry");
+            }
+            Ok(ChunkerProcessOutcome::FailedTerminal { job_id, video_id }) => {
+                tracing::error!(%job_id, %video_id, "chunker failure reached the terminal attempt limit");
+            }
             Ok(ChunkerProcessOutcome::Idle) => {
                 tokio::time::sleep(poll_interval).await;
             }

@@ -80,7 +80,9 @@ impl VideoRepository {
                 is_streamable,
                 created_at,
                 updated_at,
-                manifest_s3_key
+                manifest_s3_key,
+                error_code,
+                error_message
             FROM videos
             WHERE public_id = $1
             "#,
@@ -91,7 +93,10 @@ impl VideoRepository {
         .map_err(AppError::from)
     }
 
-    pub async fn list_ready_renditions(&self, video_id: Uuid) -> AppResult<Vec<ReadyRenditionRecord>> {
+    pub async fn list_ready_renditions(
+        &self,
+        video_id: Uuid,
+    ) -> AppResult<Vec<ReadyRenditionRecord>> {
         sqlx::query_as::<_, ReadyRenditionRecord>(
             r#"
             SELECT
@@ -414,6 +419,8 @@ pub struct VideoDetailRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub manifest_s3_key: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, FromRow)]

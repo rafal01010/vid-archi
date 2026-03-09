@@ -41,6 +41,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }) => {
                 tracing::info!(%transcoding_job_id, %video_id, %rendition, "transcoder completed rendition job");
             }
+            Ok(TranscoderProcessOutcome::RetryQueued {
+                transcoding_job_id,
+                video_id,
+                rendition,
+                next_attempt,
+            }) => {
+                tracing::warn!(
+                    %transcoding_job_id,
+                    %video_id,
+                    %rendition,
+                    %next_attempt,
+                    "transcoder failure scheduled a retry"
+                );
+            }
+            Ok(TranscoderProcessOutcome::FailedTerminal {
+                transcoding_job_id,
+                video_id,
+                rendition,
+            }) => {
+                tracing::error!(
+                    %transcoding_job_id,
+                    %video_id,
+                    %rendition,
+                    "transcoder failure reached the terminal attempt limit"
+                );
+            }
             Ok(TranscoderProcessOutcome::Idle) => {
                 tokio::time::sleep(poll_interval).await;
             }

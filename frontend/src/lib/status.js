@@ -21,7 +21,7 @@ export function describeVideoStatus(status) {
 		case 'READY':
 			return 'Ready';
 		case 'FAILED':
-			return 'Video unavailable';
+			return 'Processing encountered an issue';
 		default:
 			return status;
 	}

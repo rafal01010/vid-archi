@@ -69,6 +69,30 @@
 			refreshTimer = null;
 		}
 	}
+
+	function statusCopy(currentPlayback) {
+		if (!currentPlayback) {
+			return '';
+		}
+
+		if (currentPlayback.status === 'FAILED' && currentPlayback.isStreamable) {
+			return 'Playback is available, but processing did not finish cleanly.';
+		}
+
+		return describeVideoStatus(currentPlayback.status);
+	}
+
+	function availabilityMessage(currentPlayback) {
+		if (!currentPlayback) {
+			return 'This video is still being prepared. Check back again in a little while.';
+		}
+
+		if (currentPlayback.status === 'FAILED') {
+			return currentPlayback.errorMessage || 'This video is unavailable right now.';
+		}
+
+		return 'This video is still being prepared. Check back again in a little while.';
+	}
 </script>
 
 <div class="page-shell">
@@ -84,7 +108,7 @@
 				<div>
 					<p class="eyebrow">Video</p>
 					<h1 class="section-title">{playback.title || playback.originalFilename}</h1>
-					<p class="section-copy">{describeVideoStatus(playback.status)}</p>
+					<p class="section-copy">{statusCopy(playback)}</p>
 				</div>
 				<StatusBadge status={playback.status} />
 			</div>
@@ -100,6 +124,18 @@
 				</div>
 			</div>
 
+			{#if playback.errorMessage}
+				<div class="failure-card">
+					<p class="detail-label">Processing note</p>
+					<p class="detail-value">{playback.errorMessage}</p>
+					{#if playback.isStreamable && playback.manifestUrl}
+						<p class="failure-copy">
+							The baseline stream is still available, but later processing did not finish cleanly.
+						</p>
+					{/if}
+				</div>
+			{/if}
+
 			<ShareLinkBox sharePath={playback.playbackPath} />
 
 			{#if isVideoStreamable(playback.status, playback.isStreamable) && playback.manifestUrl}
@@ -114,9 +150,7 @@
 			{:else}
 				<div class="player-placeholder">
 					<p class="detail-label">Availability</p>
-					<p class="detail-value">
-						This video is still being prepared. Check back again in a little while.
-					</p>
+					<p class="detail-value">{availabilityMessage(playback)}</p>
 				</div>
 			{/if}
 
@@ -164,7 +198,8 @@
 	.details-card,
 	.player-placeholder,
 	.player-card,
-	.polling-note {
+	.polling-note,
+	.failure-card {
 		padding: 20px;
 		border-radius: 22px;
 		background: rgba(255, 255, 255, 0.84);
@@ -173,8 +208,19 @@
 
 	.player-card,
 	.player-placeholder,
-	.polling-note {
+	.polling-note,
+	.failure-card {
 		margin-top: 18px;
+	}
+
+	.failure-card {
+		background: var(--danger-soft);
+		border-color: rgba(151, 30, 30, 0.14);
+	}
+
+	.failure-copy {
+		margin: 10px 0 0;
+		color: var(--danger);
 	}
 
 	.detail-label {

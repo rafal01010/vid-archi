@@ -74,7 +74,7 @@ That keeps `chunker/` and `transcoder/` independently deployable while still let
 1. `POST /api/videos` validates input, creates metadata, and opens a multipart upload.
 2. `POST /api/videos/{videoId}/parts/sign` returns presigned part URLs.
 3. `POST /api/videos/{videoId}/complete` finalizes the source upload, marks the video `UPLOADED`, and inserts a parent `BASELINE` row into `processing_jobs`.
-4. A `chunker` container atomically claims that baseline job, moves the video to `PROCESSING_BASELINE`, downloads the source object, runs `ffprobe`, stores source dimensions, inserts the baseline `360p` row into `transcoding_jobs`, and also queues one `ADDITIONAL_RENDITIONS` parent job plus source-eligible higher renditions such as `480p`, `720p`, or `1080p`.
+4. A `chunker` container atomically claims that baseline job, moves the video to `PROCESSING_BASELINE`, downloads the source object, runs `ffprobe`, then commits source dimensions, the baseline `360p` child row, and any source-eligible additional-rendition jobs in one database transaction. That prevents a partial-dispatch race where a transcoder could start against a baseline parent job that the chunker later marks failed.
 5. A `transcoder` container that is configured for `TRANSCODER_RENDITION=360p` claims the baseline row, runs `ffmpeg` to completion for a full VOD-style `360p` package, uploads `videos/{video_id}/hls/master.m3u8`, `videos/{video_id}/hls/360p/360p.m3u8`, and all baseline HLS segments into the processed bucket, then marks the rendition `READY`.
 6. Only after that full baseline package exists does the transcoder set `videos.manifest_s3_key`, `is_streamable=true`, and move the video to `BASELINE_READY` or directly to `READY` when no higher source-eligible renditions exist.
 7. Higher-rendition transcoders start only after the video is already streamable. Their first claim moves the video to `PROCESSING_FULL`, each successful rendition rebuilds and overwrites `master.m3u8`, and the last planned rendition moves the video to `READY`.
@@ -135,14 +135,25 @@ Implemented now:
 - `Auto` ABR playback through the master manifest plus fixed-resolution playback through rendition playlists
 
 Still pending:
-- retry/metrics/health work from later steps
+- structured logging/correlation IDs
+- metrics and readiness work from later steps
+
+Failure and cleanup behavior implemented now:
+- bounded retry policy for `chunker` parent baseline jobs through `CHUNKER_MAX_PROCESSING_ATTEMPTS`
+- bounded retry policy for `transcoder` rendition jobs through `TRANSCODER_MAX_ATTEMPTS`
+- terminal failure details now surface through `GET /api/videos/{publicId}` and `GET /api/videos/{publicId}/playback`
+- if an additional rendition exhausts retries after the baseline is already streamable, the video now reports `status=FAILED` while keeping the baseline manifest playable
+- API/UI failure messages are now user-facing summaries; raw processing errors remain in the worker job tables
+- abandoned multipart uploads are now handled through an S3 lifecycle rule on the upload bucket that aborts incomplete multipart uploads after `1` day
 
 Playback switching model:
 - `GET /api/videos/{publicId}/playback` returns `manifestUrl` for `Auto` playback and `availableQualities[].playlistUrl` for fixed resolutions.
 - `availableQualities[].width` and `availableQualities[].height` now come from persisted transcoder output metadata, not assumed ladder dimensions.
 - while additional renditions are still running, the endpoint keeps the video streamable and reports `status=PROCESSING_FULL`
+- terminal failures also return `errorCode` and `errorMessage` so the share page can explain what happened
 - In the browser player, choosing `Auto` loads the master manifest and lets the HLS engine adapt bitrate.
 - Choosing a specific resolution such as `1080p` swaps the player source to that rendition playlist, which locks playback to that quality until the viewer switches back to `Auto`.
+- The endpoint never exposes playback URLs from worker-local state. It reads `videos.manifest_s3_key` plus ready `video_renditions` rows from Postgres, builds CloudFront or processed-bucket URLs, and only surfaces what the shared metadata says is already published.
 
 ## Tests
 

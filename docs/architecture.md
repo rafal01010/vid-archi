@@ -55,7 +55,7 @@ Docker is part of that story. The runtime YAML lives with the service that uses 
 2. `POST /api/videos/{videoId}/parts/sign` returns presigned multipart URLs and moves the video to `UPLOADING` on first use.
 3. `POST /api/videos/{videoId}/complete` finalizes the source upload, sets the video to `UPLOADED`, and inserts a parent `BASELINE` row into `processing_jobs`.
 4. A `chunker` container claims one queued baseline job atomically, marks the parent job `RUNNING`, and moves the video to `PROCESSING_BASELINE`.
-5. The chunker downloads `videos/{video_id}/source/original`, probes source dimensions with `ffprobe`, persists `source_width` and `source_height`, inserts a child row into `transcoding_jobs` for the baseline rendition, and queues an `ADDITIONAL_RENDITIONS` parent job plus higher renditions that do not exceed the source resolution.
+5. The chunker downloads `videos/{video_id}/source/original`, probes source dimensions with `ffprobe`, and commits `source_width/source_height`, the baseline child row in `transcoding_jobs`, and any source-eligible `ADDITIONAL_RENDITIONS` work in one database transaction. That keeps the baseline dispatch idempotent and avoids partial state where a transcoder can run after the chunker has already decided the baseline parent failed.
 6. A `transcoder` container with `TRANSCODER_RENDITION=360p` claims that job, downloads the same source object, runs `ffmpeg` to completion for a VOD package, and writes:
    - `videos/{video_id}/hls/master.m3u8`
    - `videos/{video_id}/hls/360p/360p.m3u8`
@@ -76,10 +76,32 @@ The current guardrails live in Postgres:
 - `processing_jobs` holds the parent baseline job lifecycle
 - `transcoding_jobs` holds per-rendition work items
 - chunkers and transcoders claim rows with atomic `RUNNING` transitions
+- chunker dispatch now writes source dimensions plus child-job fanout atomically, so retries cannot leave a half-dispatched baseline pipeline behind
+- retries create new attempt rows instead of mutating finished attempts back to `QUEUED`
 - `BASELINE_READY` is written only after the full baseline VOD package exists
 - the share-page response reads streamability from shared DB metadata, not local process state
+- user-visible failure text comes from sanitized `videos.error_message`, while raw worker failure text stays in `processing_jobs.error` and `transcoding_jobs.error`
 
 That matches the consistency requirements in the exam references and keeps the current implementation compatible with a later SQS-driven version.
+
+## Failure And Retry Policy
+
+The current `8a/8b` behavior is intentionally simple and explicit:
+- `chunker` retries failed baseline dispatch work up to `CHUNKER_MAX_PROCESSING_ATTEMPTS` by inserting a new `processing_jobs` attempt and moving the video back to `UPLOADED`
+- `transcoder` retries failed rendition work up to `TRANSCODER_MAX_ATTEMPTS` by inserting a new `transcoding_jobs` attempt under the same parent processing job
+- retries are idempotent because each retry attempt is represented as a new `(video_id, job_type|rendition, attempt)` row guarded by unique indexes
+- baseline failures that exhaust retries move the video to `FAILED` with `is_streamable=false`
+- additional-rendition failures that exhaust retries after baseline availability also move the video to `FAILED`, but keep `is_streamable=true` and retain the existing master manifest so the baseline stream can still play
+- baseline retry attempts now create the child `360p` transcoding row with the matching retry attempt number, which avoids the unique-key collision that would otherwise suppress the retried baseline job
+
+That last choice is deliberate: time-to-stream is the primary requirement, so a post-baseline processing failure should not remove already published playback artifacts.
+
+## Abandoned Multipart Cleanup
+
+The upload path now includes an operational cleanup policy for abandoned multipart uploads:
+- the default policy aborts incomplete multipart uploads after `1` day, which matches the cost-control guidance in the S3 reference material and keeps abandoned browser uploads from accumulating request/storage waste
+
+This is the lowest-risk cleanup path for the take-home because it works directly at the S3 bucket level and does not depend on an extra always-on scheduler service.
 
 ## Dockerized Service Folders
 

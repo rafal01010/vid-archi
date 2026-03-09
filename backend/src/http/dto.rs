@@ -216,6 +216,8 @@ pub struct VideoDetailsResponse {
     pub updated_at: DateTime<Utc>,
     pub playback_path: String,
     pub manifest_url: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
 }
 
 impl From<VideoDetailsResult> for VideoDetailsResponse {
@@ -230,6 +232,8 @@ impl From<VideoDetailsResult> for VideoDetailsResponse {
             updated_at: value.updated_at,
             playback_path: value.playback_path,
             manifest_url: value.manifest_url,
+            error_code: value.error_code,
+            error_message: value.error_message,
         }
     }
 }
@@ -258,6 +262,8 @@ pub struct VideoPlaybackResponse {
     pub updated_at: DateTime<Utc>,
     pub playback_path: String,
     pub manifest_url: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
     pub default_quality: String,
     pub poll_interval_ms: u64,
     pub available_qualities: Vec<PlaybackQualityResponse>,
@@ -275,6 +281,8 @@ impl From<VideoPlaybackResult> for VideoPlaybackResponse {
             updated_at: value.updated_at,
             playback_path: value.playback_path,
             manifest_url: value.manifest_url,
+            error_code: value.error_code,
+            error_message: value.error_message,
             default_quality: value.default_quality,
             poll_interval_ms: value.poll_interval_ms,
             available_qualities: value

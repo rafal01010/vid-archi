@@ -89,12 +89,14 @@ impl VideoQueryService {
             .find_video_by_public_id(normalized_public_id)
             .await?
             .ok_or_else(|| AppError::not_found("video not found"))?;
-        let ready_renditions = self
-            .repository
-            .list_ready_renditions(video.id)
-            .await?;
+        let ready_renditions = self.repository.list_ready_renditions(video.id).await?;
 
-        Ok(map_video_playback(&self.config, &self.policy, video, ready_renditions))
+        Ok(map_video_playback(
+            &self.config,
+            &self.policy,
+            video,
+            ready_renditions,
+        ))
     }
 }
 
@@ -132,6 +134,8 @@ pub struct VideoDetailsResult {
     pub updated_at: DateTime<Utc>,
     pub playback_path: String,
     pub manifest_url: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -145,6 +149,8 @@ pub struct VideoPlaybackResult {
     pub updated_at: DateTime<Utc>,
     pub playback_path: String,
     pub manifest_url: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
     pub default_quality: String,
     pub poll_interval_ms: u64,
     pub available_qualities: Vec<PlaybackQualityResult>,
@@ -211,6 +217,8 @@ fn map_video_details(config: &AppConfig, video: VideoDetailRecord) -> VideoDetai
             .manifest_s3_key
             .as_deref()
             .and_then(|manifest_key| config.manifest_url_for_key(manifest_key)),
+        error_code: video.error_code,
+        error_message: video.error_message,
     }
 }
 
@@ -256,6 +264,8 @@ fn map_video_playback(
             .manifest_s3_key
             .as_deref()
             .and_then(|manifest_key| config.manifest_url_for_key(manifest_key)),
+        error_code: video.error_code,
+        error_message: video.error_message,
         default_quality: "auto".to_owned(),
         poll_interval_ms: 5000,
         available_qualities,
@@ -268,8 +278,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        map_video_playback, normalize_page_number, normalize_recent_video_limit, ReadyRenditionRecord,
-        VideoDetailRecord,
+        map_video_playback, normalize_page_number, normalize_recent_video_limit,
+        ReadyRenditionRecord, VideoDetailRecord,
     };
     use crate::domain::video_policy::VideoPolicy;
     use crate::infrastructure::config::AppConfig;
@@ -381,6 +391,8 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 manifest_s3_key: Some("videos/demo/hls/master.m3u8".to_owned()),
+                error_code: None,
+                error_message: None,
             },
             vec![
                 ReadyRenditionRecord {

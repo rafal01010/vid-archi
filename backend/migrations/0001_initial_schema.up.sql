@@ -181,16 +181,27 @@ CREATE TABLE IF NOT EXISTS videos (
   CONSTRAINT videos_streamable_requires_streamable_status
     CHECK (
       NOT is_streamable
-      OR status IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY')
+      OR status IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY', 'FAILED')
     ),
   CONSTRAINT videos_streamable_status_requires_baseline_artifacts
     CHECK (
-      status NOT IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY')
-      OR (
-        is_streamable = TRUE
+      (
+        status IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY')
+        AND is_streamable = TRUE
         AND manifest_s3_key IS NOT NULL
         AND baseline_ready_at IS NOT NULL
       )
+      OR (
+        status = 'FAILED'
+        AND (
+          is_streamable = FALSE
+          OR (
+            manifest_s3_key IS NOT NULL
+            AND baseline_ready_at IS NOT NULL
+          )
+        )
+      )
+      OR status NOT IN ('BASELINE_READY', 'PROCESSING_FULL', 'READY', 'FAILED')
     ),
   CONSTRAINT videos_ready_requires_ready_timestamp
     CHECK (

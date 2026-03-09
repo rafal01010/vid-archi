@@ -248,7 +248,7 @@ State definitions:
   - This is a terminal state unless the system later adds an explicit manual retry/reset flow.
 
 State transition rules:
-- Do not return `streamable=true` until manifest exists and status is `BASELINE_READY`, `PROCESSING_FULL`, or `READY`.
+- Do not return `streamable=true` until manifest exists and status is `BASELINE_READY`, `PROCESSING_FULL`, or `READY`, except for the explicit preserved-playback case where a later non-baseline failure moves the video to `FAILED` after it was already streamable.
 - Treat `BASELINE_READY` as the first streamable milestone and the primary exam success condition.
 - Use `PROCESSING_FULL` only after the video is already playable and background transcoders are continuing additional-rendition work.
 - `READY` means all planned renditions for the current MVP ladder are complete.
@@ -960,6 +960,7 @@ Implementation note for `5a/5b/5c/5d`:
 - `transcoder/` now contains the Rust service that processes one configured rendition per container.
 - Current executable shape uses a separate processing EC2 host plus Docker Compose services: `chunker` and `transcoder-<resolution>`.
 - The chunker polls `processing_jobs`, claims a queued `BASELINE` job atomically, moves the video from `UPLOADED` to `PROCESSING_BASELINE`, downloads the source object, persists source dimensions via `ffprobe`, and inserts the baseline `360p` child job into `transcoding_jobs`.
+- The chunker now commits source dimensions, the baseline child job, and any source-eligible additional-rendition jobs in one database transaction so a chunker failure cannot leave a partially dispatched baseline pipeline behind.
 - The baseline transcoder downloads `videos/{video_id}/source/original`, generates `360p` HLS artifacts via `ffmpeg`, writes `videos/{video_id}/hls/master.m3u8`, and uploads artifacts to the processed bucket.
 - `BASELINE_READY` is written only after the transcoder has finished the full `360p` VOD package, uploaded the baseline playlist, uploaded the master manifest, uploaded all baseline segments, and persisted `manifest_s3_key`.
 - `GET /api/videos/{publicId}` now exposes `manifestUrl` from shared metadata using `PROCESSED_ASSET_BASE_URL` or `CDN_BASE_URL`.
@@ -976,6 +977,7 @@ Implementation note for `6a/6b/6c/6d`:
   - `manifestUrl` for `Auto` ABR playback against the master manifest
   - `availableQualities[]` built from ready `video_renditions` rows, each with its own fixed-quality `playlistUrl`
   - `pollIntervalMs` so the frontend can keep polling while more renditions are still processing
+- The endpoint contract is derived only from shared Postgres metadata, so the player never races ahead of chunker/transcoder progress held in worker-local memory.
 - Playback quality `width` and `height` now come from persisted transcoder output metadata in `video_renditions`, not from assumed ladder dimensions.
 - The schema now also persists target video/audio bitrate metadata for each rendition so step `7` can continue from a more precise source of truth.
 - The frontend playback page now polls that endpoint until the video reaches `READY` or `FAILED`.
@@ -1001,9 +1003,19 @@ Implementation note for `7a/7b/7c/7d`:
 - `7d` is satisfied in code by constructing playback URLs from `CDN_BASE_URL` / `PROCESSED_ASSET_BASE_URL` and by keeping HLS playlist and segment paths relative under `videos/{video_id}/hls/...`, which allows CloudFront to serve both `*.m3u8` and `*.ts` artifacts correctly.
 - If your CloudFront distribution already has a short-TTL behavior for `*.m3u8` and a longer-cache behavior for segment files such as `*.ts` (and optionally `*.m4a` / `*.m4s` for future packaging changes), there is nothing else mandatory for `7d`.
 
-- [ ] 8a. Add idempotent retry policy for chunker/transcoder failures.
-- [ ] 8b. Add terminal failure handling (`FAILED` state, error message surfaces in UI/API).
-- [ ] 8c. Add abandoned multipart cleanup path (scheduled task or lifecycle policy docs + config).
+- [x] 8a. Add idempotent retry policy for chunker/transcoder failures.
+- [x] 8b. Add terminal failure handling (`FAILED` state, error message surfaces in UI/API).
+- [x] 8c. Add abandoned multipart cleanup path (scheduled task or lifecycle policy docs + config).
+
+Implementation note for `8a/8b/8c`:
+- `chunker` now retries failed baseline dispatch work by inserting a new `processing_jobs` attempt up to `CHUNKER_MAX_PROCESSING_ATTEMPTS`; retries are idempotent because each attempt uses a unique `(video_id, job_type, attempt)` key.
+- Baseline dispatch is now also atomic inside a single DB transaction for source dimensions plus child-job fanout, which closes the partial-dispatch race between chunker failure handling and transcoder job pickup.
+- Baseline retry dispatch also inserts the child baseline `transcoding_jobs` row using the same retry attempt number, so later attempts do not collide with the original `360p` job row.
+- `transcoder` now retries failed rendition work by inserting a new `transcoding_jobs` attempt up to `TRANSCODER_MAX_ATTEMPTS`; this keeps finished attempts immutable and avoids reusing a partially failed row.
+- `GET /api/videos/{publicId}` and `GET /api/videos/{publicId}/playback` now expose `errorCode` and `errorMessage`.
+- `errorMessage` is a user-facing summary intended for the default share page; raw worker/ffmpeg/ffprobe error text remains in `processing_jobs.error` and `transcoding_jobs.error` for debugging.
+- The share page at `/v/{publicId}` now renders terminal failure details and, when the baseline rendition already exists, continues to allow playback even though the video reports `status=FAILED`.
+- Abandoned multipart uploads are now covered operationally by an S3 lifecycle rule on the upload bucket that aborts incomplete multipart uploads after `1` day.
 
 - [ ] 9a. Add structured logging and correlation IDs across API and processing services.
 - [ ] 9b. Add metrics for time-to-stream, queue depth, processing success/failure.
@@ -1053,6 +1065,7 @@ Checked items (`[x]`) are done items.
 - [ ] 0c.9b Confirm private resources are unreachable from internet.
 - [ ] 0c.9c Confirm API can reach DB and processing containers can reach S3/SQS.
 - [x] 0d. Provision storage and queue primitives (S3 upload bucket, S3 processed bucket, SQS queue, optional DLQ).
+- [x] 0d.1 Add an S3 lifecycle rule on the upload bucket to abort incomplete multipart uploads after `1` day.
 - [x] 0e. Provision compute + database for STG:
   - `Current STG`: app host + chunker host + transcoder host + Postgres container on app host.
   - `STG-Prod-Like`: API service + processing services + managed Postgres (RDS).

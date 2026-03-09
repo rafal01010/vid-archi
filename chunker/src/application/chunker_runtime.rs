@@ -7,12 +7,26 @@ use crate::domain::video_policy::VideoPolicy;
 use crate::error::AppResult;
 use crate::infrastructure::config::ChunkerConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
-use crate::infrastructure::postgres::{ChunkerRepository, ClaimedBaselineJob};
+use crate::infrastructure::postgres::{
+    ChunkerFailureDisposition, ChunkerRepository, ClaimedBaselineJob,
+};
 use crate::media::SourceProbe;
 
 #[derive(Debug)]
 pub enum ChunkerProcessOutcome {
-    Dispatched { job_id: Uuid, video_id: Uuid },
+    Dispatched {
+        job_id: Uuid,
+        video_id: Uuid,
+    },
+    RetryQueued {
+        job_id: Uuid,
+        video_id: Uuid,
+        next_attempt: i32,
+    },
+    FailedTerminal {
+        job_id: Uuid,
+        video_id: Uuid,
+    },
     Idle,
 }
 
@@ -57,11 +71,18 @@ impl ChunkerRuntime {
             .prepare_processing_directory(&processing_directory)
             .await
         {
-            self.repository
-                .mark_chunking_failed(job.job_id, job.video_id, &error.to_string())
+            let failure = self
+                .repository
+                .mark_chunking_failed(
+                    job.job_id,
+                    job.video_id,
+                    job.attempt,
+                    &error.to_string(),
+                    self.config.max_processing_attempts,
+                )
                 .await?;
             self.cleanup_processing_directory(&processing_directory);
-            return Err(error);
+            return Ok(map_chunker_failure(&job, failure));
         }
 
         let outcome = self.process_claimed_job(&job, &processing_directory).await;
@@ -73,10 +94,18 @@ impl ChunkerRuntime {
                 video_id: job.video_id,
             }),
             Err(error) => {
-                self.repository
-                    .mark_chunking_failed(job.job_id, job.video_id, &error.to_string())
+                let failure = self
+                    .repository
+                    .mark_chunking_failed(
+                        job.job_id,
+                        job.video_id,
+                        job.attempt,
+                        &error.to_string(),
+                        self.config.max_processing_attempts,
+                    )
                     .await?;
-                Err(error)
+                tracing::warn!(job_id = %job.job_id, video_id = %job.video_id, attempt = job.attempt, error = %error, "chunker job failed");
+                Ok(map_chunker_failure(&job, failure))
             }
         }
     }
@@ -92,20 +121,20 @@ impl ChunkerRuntime {
             .await?;
 
         let source_metadata = self.source_probe.probe(&source_path).await?;
-        self.repository
-            .record_source_dimensions(job.video_id, source_metadata.width, source_metadata.height)
-            .await?;
-
         let baseline_rendition = self.policy.baseline_rendition_name();
-        self.repository
-            .queue_transcoding_job(job.job_id, job.video_id, &baseline_rendition)
-            .await?;
-
         let additional_renditions = self
             .policy
             .source_eligible_additional_renditions(source_metadata.width, source_metadata.height);
         self.repository
-            .queue_additional_renditions_jobs(job.video_id, &additional_renditions)
+            .dispatch_transcoding_jobs(
+                job.job_id,
+                job.video_id,
+                source_metadata.width,
+                source_metadata.height,
+                &baseline_rendition,
+                &additional_renditions,
+                job.attempt,
+            )
             .await?;
 
         Ok(())
@@ -131,5 +160,24 @@ impl ChunkerRuntime {
                 tracing::warn!(path = %path.display(), error = %error, "failed to remove chunker temp directory");
             }
         });
+    }
+}
+
+fn map_chunker_failure(
+    job: &ClaimedBaselineJob,
+    disposition: ChunkerFailureDisposition,
+) -> ChunkerProcessOutcome {
+    match disposition {
+        ChunkerFailureDisposition::RetryQueued { next_attempt } => {
+            ChunkerProcessOutcome::RetryQueued {
+                job_id: job.job_id,
+                video_id: job.video_id,
+                next_attempt,
+            }
+        }
+        ChunkerFailureDisposition::Terminal => ChunkerProcessOutcome::FailedTerminal {
+            job_id: job.job_id,
+            video_id: job.video_id,
+        },
     }
 }

@@ -7,7 +7,7 @@ use crate::infrastructure::config::TranscoderConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
     ClaimedTranscodingJob, ReadyManifestVariantRecord, TranscoderRepository,
-    TranscodingCompletionUpdate, VideoProgressUpdate,
+    TranscodingCompletionUpdate, TranscodingFailureDisposition, VideoProgressUpdate,
 };
 use crate::media::{
     render_master_manifest, MasterManifestVariant, MediaProcessor, PackagedRendition,
@@ -16,6 +16,17 @@ use crate::media::{
 #[derive(Debug)]
 pub enum TranscoderProcessOutcome {
     Processed {
+        transcoding_job_id: uuid::Uuid,
+        video_id: uuid::Uuid,
+        rendition: String,
+    },
+    RetryQueued {
+        transcoding_job_id: uuid::Uuid,
+        video_id: uuid::Uuid,
+        rendition: String,
+        next_attempt: i32,
+    },
+    FailedTerminal {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
@@ -71,18 +82,21 @@ impl TranscoderRuntime {
             .prepare_processing_directory(&processing_directory)
             .await
         {
-            self.repository
+            let failure = self
+                .repository
                 .mark_transcoding_failed(
                     job.transcoding_job_id,
                     job.processing_job_id,
                     job.video_id,
+                    job.attempt,
                     &job.rendition,
                     &error.to_string(),
+                    self.config.max_transcoding_attempts,
                     self.policy.is_baseline_rendition(&job.rendition),
                 )
                 .await?;
             self.cleanup_processing_directory(&processing_directory);
-            return Err(error);
+            return Ok(map_transcoding_failure(&job, failure));
         }
 
         let outcome = self.process_claimed_job(&job, &processing_directory).await;
@@ -95,17 +109,28 @@ impl TranscoderRuntime {
                 rendition: job.rendition.clone(),
             }),
             Err(error) => {
-                self.repository
+                let failure = self
+                    .repository
                     .mark_transcoding_failed(
                         job.transcoding_job_id,
                         job.processing_job_id,
                         job.video_id,
+                        job.attempt,
                         &job.rendition,
                         &error.to_string(),
+                        self.config.max_transcoding_attempts,
                         self.policy.is_baseline_rendition(&job.rendition),
                     )
                     .await?;
-                Err(error)
+                tracing::warn!(
+                    transcoding_job_id = %job.transcoding_job_id,
+                    video_id = %job.video_id,
+                    rendition = %job.rendition,
+                    attempt = job.attempt,
+                    error = %error,
+                    "transcoder job failed"
+                );
+                Ok(map_transcoding_failure(&job, failure))
             }
         }
     }
@@ -366,4 +391,25 @@ impl TranscoderRuntime {
 fn relative_playlist_path(video_id: uuid::Uuid, playlist_key: &str) -> Option<String> {
     let prefix = format!("videos/{video_id}/hls/");
     playlist_key.strip_prefix(&prefix).map(str::to_owned)
+}
+
+fn map_transcoding_failure(
+    job: &ClaimedTranscodingJob,
+    disposition: TranscodingFailureDisposition,
+) -> TranscoderProcessOutcome {
+    match disposition {
+        TranscodingFailureDisposition::RetryQueued { next_attempt } => {
+            TranscoderProcessOutcome::RetryQueued {
+                transcoding_job_id: job.transcoding_job_id,
+                video_id: job.video_id,
+                rendition: job.rendition.clone(),
+                next_attempt,
+            }
+        }
+        TranscodingFailureDisposition::Terminal => TranscoderProcessOutcome::FailedTerminal {
+            transcoding_job_id: job.transcoding_job_id,
+            video_id: job.video_id,
+            rendition: job.rendition.clone(),
+        },
+    }
 }

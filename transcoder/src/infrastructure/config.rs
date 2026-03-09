@@ -17,6 +17,7 @@ pub struct TranscoderConfig {
     pub transcoder_id: String,
     pub rendition_name: String,
     pub poll_interval_seconds: u64,
+    pub max_transcoding_attempts: i32,
     pub transcoder_temp_dir: PathBuf,
     pub ffmpeg_binary: String,
 }
@@ -70,6 +71,7 @@ impl TranscoderConfig {
             });
         let poll_interval_seconds =
             read_env_with_default("TRANSCODER_POLL_INTERVAL_SECONDS", 5u64)?;
+        let max_transcoding_attempts = read_env_with_default("TRANSCODER_MAX_ATTEMPTS", 3i32)?;
         let transcoder_temp_dir = env::var("TRANSCODER_TEMP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp/vid-archi-transcoder"));
@@ -88,6 +90,7 @@ impl TranscoderConfig {
             transcoder_id,
             rendition_name,
             poll_interval_seconds,
+            max_transcoding_attempts,
             transcoder_temp_dir,
             ffmpeg_binary,
         })

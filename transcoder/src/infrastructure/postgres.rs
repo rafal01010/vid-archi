@@ -48,6 +48,7 @@ impl TranscoderRepository {
                     tj.id AS transcoding_job_id,
                     tj.processing_job_id,
                     tj.video_id,
+                    tj.attempt,
                     tj.rendition::text AS rendition,
                     v.source_s3_key,
                     v.source_width,
@@ -78,6 +79,7 @@ impl TranscoderRepository {
                 tj.id AS transcoding_job_id,
                 candidate.processing_job_id,
                 candidate.video_id,
+                candidate.attempt,
                 candidate.rendition,
                 candidate.source_s3_key,
                 candidate.source_width,
@@ -108,6 +110,7 @@ impl TranscoderRepository {
                     tj.id AS transcoding_job_id,
                     tj.processing_job_id,
                     tj.video_id,
+                    tj.attempt,
                     tj.rendition::text AS rendition,
                     v.source_s3_key,
                     v.source_width,
@@ -138,6 +141,7 @@ impl TranscoderRepository {
                 tj.id AS transcoding_job_id,
                 candidate.processing_job_id,
                 candidate.video_id,
+                candidate.attempt,
                 candidate.rendition,
                 candidate.source_s3_key,
                 candidate.source_width,
@@ -480,10 +484,12 @@ impl TranscoderRepository {
         transcoding_job_id: Uuid,
         processing_job_id: Uuid,
         video_id: Uuid,
+        attempt: i32,
         rendition_name: &str,
         error_message: &str,
-        promote_failure_to_video: bool,
-    ) -> AppResult<()> {
+        max_transcoding_attempts: i32,
+        is_baseline_rendition: bool,
+    ) -> AppResult<TranscodingFailureDisposition> {
         let mut transaction = self.pool.begin().await?;
         let truncated_error = truncate_error_message(error_message);
 
@@ -517,7 +523,44 @@ impl TranscoderRepository {
         .execute(&mut *transaction)
         .await?;
 
-        if promote_failure_to_video {
+        if attempt < max_transcoding_attempts {
+            sqlx::query(
+                r#"
+                INSERT INTO transcoding_jobs (
+                    id,
+                    processing_job_id,
+                    video_id,
+                    rendition,
+                    attempt,
+                    status
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4::video_rendition_name,
+                    $5,
+                    'QUEUED'::transcoding_job_status
+                )
+                ON CONFLICT (video_id, rendition, attempt) DO NOTHING
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(processing_job_id)
+            .bind(video_id)
+            .bind(rendition_name)
+            .bind(attempt + 1)
+            .execute(&mut *transaction)
+            .await?;
+
+            transaction.commit().await?;
+
+            return Ok(TranscodingFailureDisposition::RetryQueued {
+                next_attempt: attempt + 1,
+            });
+        }
+
+        if is_baseline_rendition {
             sqlx::query(
                 r#"
                 UPDATE processing_jobs
@@ -547,14 +590,51 @@ impl TranscoderRepository {
                 "#,
             )
             .bind(video_id)
+            .bind("This video could not be prepared for playback.")
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE processing_jobs
+                SET status = 'FAILED'::processing_job_status,
+                    finished_at = NOW(),
+                    error = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status IN ('QUEUED'::processing_job_status, 'RUNNING'::processing_job_status)
+                "#,
+            )
+            .bind(processing_job_id)
             .bind(&truncated_error)
+            .execute(&mut *transaction)
+            .await?;
+
+            sqlx::query(
+                r#"
+                UPDATE videos
+                SET status = 'FAILED'::video_status,
+                    is_streamable = TRUE,
+                    error_code = 'ADDITIONAL_RENDITION_TRANSCODER_FAILED',
+                    error_message = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status IN (
+                    'BASELINE_READY'::video_status,
+                    'PROCESSING_FULL'::video_status,
+                    'READY'::video_status
+                  )
+                "#,
+            )
+            .bind(video_id)
+            .bind("Playback is available, but some higher quality options could not be finished.")
             .execute(&mut *transaction)
             .await?;
         }
 
         transaction.commit().await?;
 
-        Ok(())
+        Ok(TranscodingFailureDisposition::Terminal)
     }
 }
 
@@ -573,6 +653,7 @@ pub struct ClaimedTranscodingJob {
     pub transcoding_job_id: Uuid,
     pub processing_job_id: Uuid,
     pub video_id: Uuid,
+    pub attempt: i32,
     pub rendition: String,
     pub source_s3_key: String,
     pub source_width: Option<i32>,
@@ -614,4 +695,10 @@ pub struct ReadyManifestVariantRecord {
     pub output_height: Option<i32>,
     pub target_video_bitrate_kbps: Option<i32>,
     pub target_audio_bitrate_kbps: Option<i32>,
+}
+
+#[derive(Debug)]
+pub enum TranscodingFailureDisposition {
+    RetryQueued { next_attempt: i32 },
+    Terminal,
 }

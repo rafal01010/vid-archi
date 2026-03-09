@@ -50,6 +50,7 @@ Returns the current lifecycle state and share-page metadata for a public video.
 The endpoint behavior is now:
 - resolve the stable `publicId`
 - read `status`, `is_streamable`, and `manifest_s3_key` from Postgres
+- include `errorCode` and `errorMessage` when processing ended in a terminal failure
 - build `manifestUrl` from `PROCESSED_ASSET_BASE_URL`, `CDN_BASE_URL`, or the local processed-bucket base URL
 - expose `manifestUrl` only after the baseline transcoder has published the full `360p` VOD-style HLS package and marked the video `BASELINE_READY`
 
@@ -81,7 +82,9 @@ Response after baseline is ready:
   "createdAt": "2026-03-08T14:00:00Z",
   "updatedAt": "2026-03-08T14:05:30Z",
   "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
-  "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8"
+  "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8",
+  "errorCode": null,
+  "errorMessage": null
 }
 ```
 
@@ -98,7 +101,9 @@ The endpoint behavior is now:
 - expose rendition `width` and `height` from persisted transcoder output metadata instead of assumed policy ladder dimensions
 - expose new qualities as soon as each source-eligible additional rendition reaches `READY`
 - keep the streamable status stable while background processing moves from `BASELINE_READY` to `PROCESSING_FULL` and finally `READY`
+- surface terminal failure details through `errorCode` and `errorMessage`
 - keep polling cadence server-driven through `pollIntervalMs`
+- only expose what has already been committed to shared metadata, so the player contract cannot race ahead of chunker/transcoder state in another process
 
 Response while only the baseline rendition is ready:
 
@@ -113,6 +118,8 @@ Response while only the baseline rendition is ready:
   "updatedAt": "2026-03-08T14:05:30Z",
   "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
   "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8",
+  "errorCode": null,
+  "errorMessage": null,
   "defaultQuality": "auto",
   "pollIntervalMs": 5000,
   "availableQualities": [
@@ -142,6 +149,8 @@ Response after additional renditions have finished:
   "updatedAt": "2026-03-08T14:09:00Z",
   "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
   "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8",
+  "errorCode": null,
+  "errorMessage": null,
   "defaultQuality": "auto",
   "pollIntervalMs": 5000,
   "availableQualities": [
@@ -162,6 +171,37 @@ Response after additional renditions have finished:
       "codec": "h264",
       "container": "mpegts",
       "playlistUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/720p/720p.m3u8"
+    }
+  ]
+}
+```
+
+Response after the baseline is already playable but a later rendition exhausts retries:
+
+```json
+{
+  "publicId": "demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "title": "Demo upload",
+  "originalFilename": "demo.mp4",
+  "status": "FAILED",
+  "isStreamable": true,
+  "createdAt": "2026-03-08T14:00:00Z",
+  "updatedAt": "2026-03-08T14:09:45Z",
+  "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8",
+  "errorCode": "ADDITIONAL_RENDITION_TRANSCODER_FAILED",
+  "errorMessage": "Playback is available, but some higher quality options could not be finished.",
+  "defaultQuality": "auto",
+  "pollIntervalMs": 5000,
+  "availableQualities": [
+    {
+      "name": "360p",
+      "label": "360p",
+      "width": 640,
+      "height": 360,
+      "codec": "h264",
+      "container": "mpegts",
+      "playlistUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/360p/360p.m3u8"
     }
   ]
 }
@@ -279,3 +319,9 @@ Response:
 - final source-eligible rendition completes: `READY`
 
 The share page now uses `GET /api/videos/{publicId}/playback`. `manifestUrl` powers `Auto` ABR playback, while `availableQualities[].playlistUrl` powers fixed-resolution playback.
+
+Retry and failure additions:
+- `chunker` retries failed baseline dispatch attempts up to `CHUNKER_MAX_PROCESSING_ATTEMPTS`
+- `transcoder` retries failed rendition attempts up to `TRANSCODER_MAX_ATTEMPTS`
+- terminal failures surface `errorCode` and a user-facing `errorMessage` through the read endpoints
+- if a post-baseline additional rendition fails terminally, the API returns `status=FAILED` while keeping `isStreamable=true` and preserving the baseline manifest URL
