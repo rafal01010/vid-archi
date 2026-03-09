@@ -85,10 +85,16 @@ echo "Using PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-<same-origin-relative-wit
 mkdir -p "${LOG_DIR}"
 stop_existing_frontend
 
+if command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :${PORT} )" | grep -q ":${PORT}"; then
+  echo "Frontend port ${PORT} is already in use."
+  echo "Stop the conflicting process before starting the STG frontend preview server."
+  exit 1
+fi
+
 if [[ "${BACKGROUND}" == "1" ]]; then
-  nohup npm run preview -- --host "${HOST}" --port "${PORT}" > "${LOG_DIR}/frontend.log" 2>&1 &
+  nohup npm run preview -- --host "${HOST}" --port "${PORT}" --strictPort > "${LOG_DIR}/frontend.log" 2>&1 &
   echo $! > "${PID_FILE}"
   echo "Frontend PID $(cat "${PID_FILE}")"
 else
-  exec npm run preview -- --host "${HOST}" --port "${PORT}"
+  exec npm run preview -- --host "${HOST}" --port "${PORT}" --strictPort
 fi

@@ -1,6 +1,8 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig, loadEnv } from 'vite';
 
+const STATIC_ALLOWED_HOSTS = ['stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com'];
+
 function normalizeAllowedHost(value) {
 	if (!value) {
 		return null;
@@ -24,6 +26,7 @@ export default defineConfig(({ mode }) => {
 	const allowedHosts = Array.from(
 		new Set(
 			[
+				...STATIC_ALLOWED_HOSTS,
 				env.STG_ALB_DNS,
 				env.PUBLIC_API_BASE_URL,
 				env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
