@@ -77,18 +77,19 @@ stop_existing_backend() {
 
 find_listening_pid() {
   local port="$1"
+  local listener_pid=""
 
   if command -v lsof >/dev/null 2>&1; then
-    lsof -t -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | head -n1
-    return
-  fi
-
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltnp "( sport = :${port} )" 2>/dev/null \
+    listener_pid="$(lsof -t -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | head -n1 || true)"
+  elif command -v ss >/dev/null 2>&1; then
+    listener_pid="$(ss -ltnp "( sport = :${port} )" 2>/dev/null \
       | grep -o 'pid=[0-9]\+' \
       | head -n1 \
-      | cut -d= -f2
+      | cut -d= -f2 || true)"
   fi
+
+  echo "${listener_pid}"
+  return 0
 }
 
 stop_known_backend_processes() {
@@ -163,7 +164,7 @@ fi
 
 if [[ "${BACKGROUND}" == "1" ]]; then
   echo "Starting backend in background with RUST_LOG=${RUST_LOG}"
-  nohup "${DIST_DIR}/vid-archi-backend" > "${LOG_DIR}/backend.log" 2>&1 &
+  nohup "${DIST_DIR}/vid-archi-backend" >> "${LOG_DIR}/backend.log" 2>&1 &
   echo $! > "${PID_FILE}"
   echo "Backend PID $(cat "${PID_FILE}")"
   wait_for_startup "$(cat "${PID_FILE}")" "${API_PORT:-8080}" "Backend API"
