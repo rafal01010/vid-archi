@@ -3,13 +3,14 @@
 This crate is the second processing stage for the split media pipeline.
 
 Responsibilities:
-- claim queued rows from `transcoding_jobs`
+- receive rendition work from the transcoder SQS queue, then atomically claim the matching row from `transcoding_jobs`
 - run only for one configured `TRANSCODER_RENDITION`
 - download the source object
 - build HLS artifacts for that rendition with `ffmpeg`
 - rebuild and upload `master.m3u8` so `Auto` playback stays aligned with ready renditions
 - upload playlists and segments to the processed bucket
 - mark baseline streamability when the `360p` rendition finishes
+- publish queued higher-rendition jobs to the transcoder SQS queue after baseline playback becomes available
 - move additional-rendition work through `PROCESSING_FULL` and finish at `READY`
 
 Container model:

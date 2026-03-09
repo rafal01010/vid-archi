@@ -6,10 +6,12 @@ use tracing::Instrument;
 use crate::domain::video_policy::VideoPolicy;
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::config::TranscoderConfig;
+use crate::infrastructure::message_queue::TranscoderJobMessage;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
-    ClaimedTranscodingJob, ReadyManifestVariantRecord, TranscoderRepository,
-    TranscodingCompletionUpdate, TranscodingFailureDisposition, VideoProgressUpdate,
+    ClaimedTranscodingJob, QueuedTranscodingJobRecord, ReadyManifestVariantRecord,
+    TranscoderRepository, TranscodingCompletionUpdate, TranscodingFailureDisposition,
+    VideoProgressUpdate,
 };
 use crate::media::{
     render_master_manifest, MasterManifestVariant, MediaProcessor, PackagedRendition,
@@ -21,19 +23,28 @@ pub enum TranscoderProcessOutcome {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
+        follow_up_jobs: Vec<TranscoderJobMessage>,
     },
     RetryQueued {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
         next_attempt: i32,
+        retry_job_message: TranscoderJobMessage,
     },
     FailedTerminal {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
     },
-    Idle,
+    Ignored {
+        transcoding_job_id: uuid::Uuid,
+    },
+    WrongRendition {
+        transcoding_job_id: uuid::Uuid,
+        queue_rendition: String,
+        worker_rendition: String,
+    },
 }
 
 #[derive(Clone)]
@@ -62,20 +73,34 @@ impl TranscoderRuntime {
         }
     }
 
-    pub async fn process_next_job(&self) -> AppResult<TranscoderProcessOutcome> {
+    pub async fn process_job(
+        &self,
+        queue_message: &TranscoderJobMessage,
+    ) -> AppResult<TranscoderProcessOutcome> {
+        if queue_message.rendition != self.config.rendition_name {
+            return Ok(TranscoderProcessOutcome::WrongRendition {
+                transcoding_job_id: queue_message.transcoding_job_id,
+                queue_rendition: queue_message.rendition.clone(),
+                worker_rendition: self.config.rendition_name.clone(),
+            });
+        }
+
         let is_baseline_rendition = self
             .policy
             .is_baseline_rendition(&self.config.rendition_name);
         let Some(job) = self
             .repository
-            .claim_next_transcoding_job(
+            .claim_transcoding_job(
+                queue_message.transcoding_job_id,
                 &self.config.transcoder_id,
                 &self.config.rendition_name,
                 is_baseline_rendition,
             )
             .await?
         else {
-            return Ok(TranscoderProcessOutcome::Idle);
+            return Ok(TranscoderProcessOutcome::Ignored {
+                transcoding_job_id: queue_message.transcoding_job_id,
+            });
         };
 
         let processing_directory = self.processing_directory(&job);
@@ -118,10 +143,11 @@ impl TranscoderRuntime {
         self.cleanup_processing_directory(&processing_directory);
 
         match outcome {
-            Ok(()) => Ok(TranscoderProcessOutcome::Processed {
+            Ok(follow_up_jobs) => Ok(TranscoderProcessOutcome::Processed {
                 transcoding_job_id: job.transcoding_job_id,
                 video_id: job.video_id,
                 rendition: job.rendition.clone(),
+                follow_up_jobs,
             }),
             Err(error) => {
                 let failure = self
@@ -155,7 +181,7 @@ impl TranscoderRuntime {
         &self,
         job: &ClaimedTranscodingJob,
         processing_directory: &PathBuf,
-    ) -> AppResult<()> {
+    ) -> AppResult<Vec<TranscoderJobMessage>> {
         tracing::info!(source_s3_key = %job.source_s3_key, "claimed transcoding job");
 
         let source_width = job.source_width.ok_or_else(|| {
@@ -283,7 +309,18 @@ impl TranscoderRuntime {
             }
         }
 
-        Ok(())
+        if self.policy.is_baseline_rendition(&job.rendition) {
+            let queued_jobs = self
+                .repository
+                .list_queued_additional_transcoding_jobs(job.video_id)
+                .await?;
+            return Ok(queued_jobs
+                .into_iter()
+                .map(map_queued_job_to_message)
+                .collect());
+        }
+
+        Ok(Vec::new())
     }
 
     fn build_completion_update(
@@ -431,12 +468,23 @@ fn map_transcoding_failure(
     disposition: TranscodingFailureDisposition,
 ) -> TranscoderProcessOutcome {
     match disposition {
-        TranscodingFailureDisposition::RetryQueued { next_attempt } => {
+        TranscodingFailureDisposition::RetryQueued {
+            retry_transcoding_job_id,
+            next_attempt,
+        } => {
             TranscoderProcessOutcome::RetryQueued {
                 transcoding_job_id: job.transcoding_job_id,
                 video_id: job.video_id,
                 rendition: job.rendition.clone(),
                 next_attempt,
+                retry_job_message: TranscoderJobMessage {
+                    transcoding_job_id: retry_transcoding_job_id,
+                    processing_job_id: job.processing_job_id,
+                    video_id: job.video_id,
+                    rendition: job.rendition.clone(),
+                    correlation_id: job.correlation_id.clone(),
+                    attempt: next_attempt,
+                },
             }
         }
         TranscodingFailureDisposition::Terminal => TranscoderProcessOutcome::FailedTerminal {
@@ -444,5 +492,16 @@ fn map_transcoding_failure(
             video_id: job.video_id,
             rendition: job.rendition.clone(),
         },
+    }
+}
+
+fn map_queued_job_to_message(job: QueuedTranscodingJobRecord) -> TranscoderJobMessage {
+    TranscoderJobMessage {
+        transcoding_job_id: job.transcoding_job_id,
+        processing_job_id: job.processing_job_id,
+        video_id: job.video_id,
+        rendition: job.rendition,
+        correlation_id: job.correlation_id,
+        attempt: job.attempt,
     }
 }

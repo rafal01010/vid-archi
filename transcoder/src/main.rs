@@ -14,6 +14,7 @@ use dotenvy::dotenv;
 use crate::application::{TranscoderProcessOutcome, TranscoderRuntime};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::TranscoderConfig;
+use crate::infrastructure::message_queue::{TranscoderQueueConsumer, TranscoderQueuePublisher};
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::TranscoderRepository;
 use crate::media::MediaProcessor;
@@ -29,17 +30,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let policy = Arc::new(VideoPolicy::load(&config.video_policy_file).await?);
     let repository = TranscoderRepository::connect(&config.database_url).await?;
     let object_storage = ObjectStorage::new(&config).await?;
+    let queue_consumer = TranscoderQueueConsumer::new(&config).await?;
+    let queue_publisher = TranscoderQueuePublisher::new(&config).await?;
     let media_processor = MediaProcessor::new(&config);
     let runtime =
         TranscoderRuntime::new(config, policy, repository, object_storage, media_processor);
 
     loop {
-        match runtime.process_next_job().await {
+        let Some(message) = queue_consumer.receive().await? else {
+            continue;
+        };
+
+        match runtime.process_job(&message.payload).await {
             Ok(TranscoderProcessOutcome::Processed {
                 transcoding_job_id,
                 video_id,
                 rendition,
+                follow_up_jobs,
             }) => {
+                queue_consumer.delete(&message.receipt_handle).await?;
+                for follow_up_job in follow_up_jobs {
+                    queue_publisher.enqueue(follow_up_job).await?;
+                }
                 tracing::info!(%transcoding_job_id, %video_id, %rendition, "transcoder completed rendition job");
             }
             Ok(TranscoderProcessOutcome::RetryQueued {
@@ -47,7 +59,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 video_id,
                 rendition,
                 next_attempt,
+                retry_job_message,
             }) => {
+                queue_consumer.delete(&message.receipt_handle).await?;
+                queue_publisher.enqueue(retry_job_message).await?;
                 tracing::warn!(
                     %transcoding_job_id,
                     %video_id,
@@ -61,6 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 video_id,
                 rendition,
             }) => {
+                queue_consumer.delete(&message.receipt_handle).await?;
                 tracing::error!(
                     %transcoding_job_id,
                     %video_id,
@@ -68,7 +84,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     "transcoder failure reached the terminal attempt limit"
                 );
             }
-            Ok(TranscoderProcessOutcome::Idle) => {
+            Ok(TranscoderProcessOutcome::Ignored { transcoding_job_id }) => {
+                queue_consumer.delete(&message.receipt_handle).await?;
+                tracing::info!(%transcoding_job_id, "transcoder ignored stale or duplicate queue message");
+            }
+            Ok(TranscoderProcessOutcome::WrongRendition {
+                transcoding_job_id,
+                queue_rendition,
+                worker_rendition,
+            }) => {
+                queue_consumer.release(&message.receipt_handle).await?;
+                tracing::info!(
+                    %transcoding_job_id,
+                    %queue_rendition,
+                    %worker_rendition,
+                    "transcoder released queue message for a different rendition worker"
+                );
                 tokio::time::sleep(poll_interval).await;
             }
             Err(error) => {

@@ -328,6 +328,7 @@ mod tests {
             aws_region: "ap-northeast-1".to_owned(),
             upload_bucket: "upload-bucket".to_owned(),
             processed_bucket: "processed-bucket".to_owned(),
+            sqs_chunker_queue_url: "https://sqs.example.com/queue".to_owned(),
             processed_asset_base_url: Some("https://cdn.example.com".to_owned()),
             video_policy_file: "config/video_policy.json".into(),
             s3_endpoint_url: None,

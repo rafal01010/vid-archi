@@ -7,6 +7,7 @@ use crate::domain::public_id::PublicIdGenerator;
 use crate::domain::video_policy::VideoPolicy;
 use crate::http::error::{AppError, AppResult};
 use crate::infrastructure::config::AppConfig;
+use crate::infrastructure::message_queue::{ChunkerJobMessage, ChunkerQueuePublisher};
 use crate::infrastructure::object_storage::{
     CompletedUploadPart, ObjectStorage, PresignedUploadPart,
 };
@@ -22,6 +23,7 @@ pub struct UploadService {
     policy: Arc<VideoPolicy>,
     repository: VideoRepository,
     object_storage: ObjectStorage,
+    queue_publisher: ChunkerQueuePublisher,
     public_id_generator: PublicIdGenerator,
 }
 
@@ -31,12 +33,14 @@ impl UploadService {
         policy: VideoPolicy,
         repository: VideoRepository,
         object_storage: ObjectStorage,
+        queue_publisher: ChunkerQueuePublisher,
     ) -> Self {
         Self {
             config: Arc::new(config),
             policy: Arc::new(policy),
             repository,
             object_storage,
+            queue_publisher,
             public_id_generator: PublicIdGenerator::default(),
         }
     }
@@ -211,6 +215,9 @@ impl UploadService {
                     AppError::internal("missing finalized upload after completed session")
                 })?;
 
+            self.enqueue_chunker_job(&finalized_upload, correlation_id.as_str())
+                .await?;
+
             return Ok(map_finalized_upload(finalized_upload));
         }
 
@@ -244,6 +251,9 @@ impl UploadService {
         let finalized_upload = self
             .repository
             .finalize_completed_upload(video_id, command.upload_session_id, correlation_id.as_str())
+            .await?;
+
+        self.enqueue_chunker_job(&finalized_upload, correlation_id.as_str())
             .await?;
 
         tracing::info!(
@@ -307,6 +317,27 @@ impl UploadService {
         }
 
         Ok(upload_session)
+    }
+
+    async fn enqueue_chunker_job(
+        &self,
+        finalized_upload: &FinalizedUploadRecord,
+        correlation_id: &str,
+    ) -> AppResult<()> {
+        self.queue_publisher
+            .enqueue(ChunkerJobMessage {
+                processing_job_id: finalized_upload.processing_job_id,
+                video_id: finalized_upload.video_id,
+                correlation_id: correlation_id.to_owned(),
+                attempt: 1,
+            })
+            .await
+            .map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to enqueue baseline processing",
+                    error.to_string(),
+                )
+            })
     }
 }
 

@@ -14,7 +14,7 @@ Storage and queues:
 - Upload bucket: `stg-video-upload-1a`
 - Processed bucket: `stg-video-processed-1a`
 - Chunker queue: `stg-chunker-queue`
-- Transcoder queue: `stg-transcoder-queue`
+- Transcoder queues: `stg-transcoder-{360p,480p,720p,1080p,1440p,2160p}-queue`
 
 Compute layout:
 

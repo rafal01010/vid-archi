@@ -18,8 +18,9 @@ impl ChunkerRepository {
         Ok(Self { pool })
     }
 
-    pub async fn claim_next_baseline_job(
+    pub async fn claim_baseline_job(
         &self,
+        processing_job_id: Uuid,
         worker_id: &str,
     ) -> AppResult<Option<ClaimedBaselineJob>> {
         let mut transaction = self.pool.begin().await?;
@@ -36,12 +37,11 @@ impl ChunkerRepository {
                 FROM processing_jobs p
                 INNER JOIN videos v
                     ON v.id = p.video_id
-                WHERE p.job_type = 'BASELINE'::processing_job_type
+                WHERE p.id = $2
+                  AND p.job_type = 'BASELINE'::processing_job_type
                   AND p.status = 'QUEUED'::processing_job_status
                   AND v.status = 'UPLOADED'::video_status
-                ORDER BY p.created_at ASC
                 FOR UPDATE SKIP LOCKED
-                LIMIT 1
             )
             UPDATE processing_jobs p
             SET status = 'RUNNING'::processing_job_status,
@@ -60,6 +60,7 @@ impl ChunkerRepository {
             "#,
         )
         .bind(worker_id)
+        .bind(processing_job_id)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -105,8 +106,9 @@ impl ChunkerRepository {
         baseline_rendition_name: &str,
         additional_rendition_names: &[String],
         attempt: i32,
-    ) -> AppResult<()> {
+    ) -> AppResult<DispatchTranscodingJobsResult> {
         let mut transaction = self.pool.begin().await?;
+        let baseline_transcoding_job_id = Uuid::new_v4();
 
         sqlx::query(
             r#"
@@ -146,7 +148,7 @@ impl ChunkerRepository {
             ON CONFLICT (video_id, rendition, attempt) DO NOTHING
             "#,
         )
-        .bind(Uuid::new_v4())
+        .bind(baseline_transcoding_job_id)
         .bind(processing_job_id)
         .bind(video_id)
         .bind(baseline_rendition_name)
@@ -233,9 +235,28 @@ impl ChunkerRepository {
             }
         }
 
+        let persisted_baseline_transcoding_job_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id
+            FROM transcoding_jobs
+            WHERE video_id = $1
+              AND rendition = $2::video_rendition_name
+              AND attempt = $3
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(video_id)
+        .bind(baseline_rendition_name)
+        .bind(attempt)
+        .fetch_one(&mut *transaction)
+        .await?;
+
         transaction.commit().await?;
 
-        Ok(())
+        Ok(DispatchTranscodingJobsResult {
+            baseline_transcoding_job_id: persisted_baseline_transcoding_job_id,
+        })
     }
 
     pub async fn mark_chunking_failed(
@@ -267,6 +288,7 @@ impl ChunkerRepository {
         .await?;
 
         if attempt < max_processing_attempts {
+            let retry_job_id = Uuid::new_v4();
             sqlx::query(
                 r#"
                 INSERT INTO processing_jobs (
@@ -288,7 +310,7 @@ impl ChunkerRepository {
                 ON CONFLICT (video_id, job_type, attempt) DO NOTHING
                 "#,
             )
-            .bind(Uuid::new_v4())
+            .bind(retry_job_id)
             .bind(video_id)
             .bind(attempt + 1)
             .bind(correlation_id)
@@ -313,6 +335,7 @@ impl ChunkerRepository {
             transaction.commit().await?;
 
             return Ok(ChunkerFailureDisposition::RetryQueued {
+                retry_job_id,
                 next_attempt: attempt + 1,
             });
         }
@@ -361,6 +384,11 @@ pub struct ClaimedBaselineJob {
 
 #[derive(Debug)]
 pub enum ChunkerFailureDisposition {
-    RetryQueued { next_attempt: i32 },
+    RetryQueued { retry_job_id: Uuid, next_attempt: i32 },
     Terminal,
+}
+
+#[derive(Debug)]
+pub struct DispatchTranscodingJobsResult {
+    pub baseline_transcoding_job_id: Uuid,
 }

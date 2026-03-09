@@ -18,24 +18,26 @@ impl TranscoderRepository {
         Ok(Self { pool })
     }
 
-    pub async fn claim_next_transcoding_job(
+    pub async fn claim_transcoding_job(
         &self,
+        transcoding_job_id: Uuid,
         worker_id: &str,
         rendition_name: &str,
         is_baseline_rendition: bool,
     ) -> AppResult<Option<ClaimedTranscodingJob>> {
         if is_baseline_rendition {
             return self
-                .claim_next_baseline_transcoding_job(worker_id, rendition_name)
+                .claim_baseline_transcoding_job(transcoding_job_id, worker_id, rendition_name)
                 .await;
         }
 
-        self.claim_next_additional_renditions_job(worker_id, rendition_name)
+        self.claim_additional_renditions_job(transcoding_job_id, worker_id, rendition_name)
             .await
     }
 
-    async fn claim_next_baseline_transcoding_job(
+    async fn claim_baseline_transcoding_job(
         &self,
+        transcoding_job_id: Uuid,
         worker_id: &str,
         rendition_name: &str,
     ) -> AppResult<Option<ClaimedTranscodingJob>> {
@@ -59,14 +61,13 @@ impl TranscoderRepository {
                     ON v.id = tj.video_id
                 INNER JOIN processing_jobs p
                     ON p.id = tj.processing_job_id
-                WHERE tj.status = 'QUEUED'::transcoding_job_status
+                WHERE tj.id = $3
+                  AND tj.status = 'QUEUED'::transcoding_job_status
                   AND tj.rendition = $2::video_rendition_name
                   AND p.job_type = 'BASELINE'::processing_job_type
                   AND p.status = 'RUNNING'::processing_job_status
                   AND v.status = 'PROCESSING_BASELINE'::video_status
-                ORDER BY tj.created_at ASC
                 FOR UPDATE SKIP LOCKED
-                LIMIT 1
             )
             UPDATE transcoding_jobs tj
             SET status = 'RUNNING'::transcoding_job_status,
@@ -90,6 +91,7 @@ impl TranscoderRepository {
         )
         .bind(worker_id)
         .bind(rendition_name)
+        .bind(transcoding_job_id)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -98,8 +100,9 @@ impl TranscoderRepository {
         Ok(claimed_job)
     }
 
-    async fn claim_next_additional_renditions_job(
+    async fn claim_additional_renditions_job(
         &self,
+        transcoding_job_id: Uuid,
         worker_id: &str,
         rendition_name: &str,
     ) -> AppResult<Option<ClaimedTranscodingJob>> {
@@ -123,14 +126,13 @@ impl TranscoderRepository {
                     ON v.id = tj.video_id
                 INNER JOIN processing_jobs p
                     ON p.id = tj.processing_job_id
-                WHERE tj.status = 'QUEUED'::transcoding_job_status
+                WHERE tj.id = $3
+                  AND tj.status = 'QUEUED'::transcoding_job_status
                   AND tj.rendition = $2::video_rendition_name
                   AND p.job_type = 'ADDITIONAL_RENDITIONS'::processing_job_type
                   AND p.status IN ('QUEUED'::processing_job_status, 'RUNNING'::processing_job_status)
                   AND v.status IN ('BASELINE_READY'::video_status, 'PROCESSING_FULL'::video_status)
-                ORDER BY tj.created_at ASC
                 FOR UPDATE SKIP LOCKED
-                LIMIT 1
             )
             UPDATE transcoding_jobs tj
             SET status = 'RUNNING'::transcoding_job_status,
@@ -154,6 +156,7 @@ impl TranscoderRepository {
         )
         .bind(worker_id)
         .bind(rendition_name)
+        .bind(transcoding_job_id)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -197,6 +200,34 @@ impl TranscoderRepository {
         transaction.commit().await?;
 
         Ok(Some(claimed_job))
+    }
+
+    pub async fn list_queued_additional_transcoding_jobs(
+        &self,
+        video_id: Uuid,
+    ) -> AppResult<Vec<QueuedTranscodingJobRecord>> {
+        sqlx::query_as::<_, QueuedTranscodingJobRecord>(
+            r#"
+            SELECT
+                tj.id AS transcoding_job_id,
+                tj.processing_job_id,
+                tj.video_id,
+                tj.rendition::text AS rendition,
+                tj.correlation_id,
+                tj.attempt
+            FROM transcoding_jobs tj
+            INNER JOIN processing_jobs p
+                ON p.id = tj.processing_job_id
+            WHERE tj.video_id = $1
+              AND tj.status = 'QUEUED'::transcoding_job_status
+              AND p.job_type = 'ADDITIONAL_RENDITIONS'::processing_job_type
+            ORDER BY tj.created_at ASC
+            "#,
+        )
+        .bind(video_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::from)
     }
 
     pub async fn begin_video_completion_session(
@@ -529,6 +560,7 @@ impl TranscoderRepository {
         .await?;
 
         if attempt < max_transcoding_attempts {
+            let retry_transcoding_job_id = Uuid::new_v4();
             sqlx::query(
                 r#"
                 INSERT INTO transcoding_jobs (
@@ -552,7 +584,7 @@ impl TranscoderRepository {
                 ON CONFLICT (video_id, rendition, attempt) DO NOTHING
                 "#,
             )
-            .bind(Uuid::new_v4())
+            .bind(retry_transcoding_job_id)
             .bind(processing_job_id)
             .bind(video_id)
             .bind(rendition_name)
@@ -564,6 +596,7 @@ impl TranscoderRepository {
             transaction.commit().await?;
 
             return Ok(TranscodingFailureDisposition::RetryQueued {
+                retry_transcoding_job_id,
                 next_attempt: attempt + 1,
             });
         }
@@ -706,8 +739,21 @@ pub struct ReadyManifestVariantRecord {
     pub target_audio_bitrate_kbps: Option<i32>,
 }
 
+#[derive(Debug, FromRow)]
+pub struct QueuedTranscodingJobRecord {
+    pub transcoding_job_id: Uuid,
+    pub processing_job_id: Uuid,
+    pub video_id: Uuid,
+    pub rendition: String,
+    pub correlation_id: String,
+    pub attempt: i32,
+}
+
 #[derive(Debug)]
 pub enum TranscodingFailureDisposition {
-    RetryQueued { next_attempt: i32 },
+    RetryQueued {
+        retry_transcoding_job_id: Uuid,
+        next_attempt: i32,
+    },
     Terminal,
 }

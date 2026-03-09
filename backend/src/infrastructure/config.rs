@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub aws_region: String,
     pub upload_bucket: String,
     pub processed_bucket: String,
+    pub sqs_chunker_queue_url: String,
     pub processed_asset_base_url: Option<String>,
     pub video_policy_file: PathBuf,
     pub s3_endpoint_url: Option<String>,
@@ -35,6 +36,7 @@ impl AppConfig {
             "LOCAL_PROCESSED_BUCKET",
             "processed bucket",
         )?;
+        let sqs_chunker_queue_url = read_required_env("SQS_CHUNKER_QUEUE_URL")?;
         let processed_asset_base_url = env::var("PROCESSED_ASSET_BASE_URL")
             .ok()
             .or_else(|| env::var("CDN_BASE_URL").ok())
@@ -66,6 +68,7 @@ impl AppConfig {
             aws_region,
             upload_bucket,
             processed_bucket,
+            sqs_chunker_queue_url,
             processed_asset_base_url,
             video_policy_file,
             s3_endpoint_url,

@@ -609,8 +609,9 @@ Why this matters:
 - Time-to-stream remains prioritized because 360p is produced first and gates streamability.
 
 Processing execution model:
-- Chunker polls queue (SQS) or DB job table for parent baseline jobs.
-- Transcoder polls queue (SQS) or DB job table for one configured rendition.
+- Backend inserts durable job rows in Postgres and publishes queue messages to SQS.
+- Chunker consumes the chunker SQS queue, then atomically claims the referenced parent baseline job row in Postgres.
+- Transcoder consumes the transcoder SQS queue, then atomically claims the referenced rendition job row in Postgres.
 - Lock job atomically (`RUNNING`) to avoid duplicate claims.
 - Retry transient failures with capped attempts + backoff.
 - Move permanent failures to `FAILED` with error details.
@@ -855,7 +856,12 @@ Region baseline:
 | `UPLOAD_BUCKET` | `stg-video-upload-1a` | |
 | `PROCESSED_BUCKET` | `stg-video-processed-1a` | |
 | `SQS_CHUNKER_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-chunker-queue` | |
-| `SQS_TRANSCODER_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-queue` | |
+| `SQS_TRANSCODER_360P_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-360p-queue` | |
+| `SQS_TRANSCODER_480P_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-480p-queue` | |
+| `SQS_TRANSCODER_720P_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-720p-queue` | |
+| `SQS_TRANSCODER_1080P_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-1080p-queue` | |
+| `SQS_TRANSCODER_1440P_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-1440p-queue` | |
+| `SQS_TRANSCODER_2160P_QUEUE_URL` | `https://sqs.ap-northeast-1.amazonaws.com/799168734365/stg-transcoder-2160p-queue` | |
 | `STG_POSTGRES_DB` | `vid-archi-db` | Container bootstrap DB name |
 | `STG_POSTGRES_USER` | `video-db-access` | Container bootstrap DB user |
 | `STG_POSTGRES_PASSWORD` | `video-db-password` | Container bootstrap DB password |
@@ -870,7 +876,12 @@ Still missing from the current STG inventory:
   - bucket ARN
 - Queue resources:
   - chunker queue ARN
-  - transcoder queue ARN
+  - transcoder 360p queue ARN
+  - transcoder 480p queue ARN
+  - transcoder 720p queue ARN
+  - transcoder 1080p queue ARN
+  - transcoder 1440p queue ARN
+  - transcoder 2160p queue ARN
   - chunker DLQ name/URL/ARN if created
   - transcoder DLQ name/URL/ARN if created
 - Network resources:
@@ -1007,9 +1018,10 @@ Implementation note for `5a/5b/5c/5d`:
 - `chunker/` now contains the Rust service that claims parent `BASELINE` jobs and dispatches child rendition jobs.
 - `transcoder/` now contains the Rust service that processes one configured rendition per container.
 - Current executable shape uses a separate processing EC2 host plus Docker Compose services: `chunker` and `transcoder-<resolution>`.
-- The chunker polls `processing_jobs`, claims a queued `BASELINE` job atomically, moves the video from `UPLOADED` to `PROCESSING_BASELINE`, downloads the source object, persists source dimensions via `ffprobe`, and inserts the baseline `360p` child job into `transcoding_jobs`.
+- The backend now inserts the durable `BASELINE` job row and immediately publishes a chunker SQS message after multipart completion, so upload completion triggers processing through the queue path instead of worker-side DB polling.
+- The chunker now consumes the chunker SQS queue, claims the referenced `BASELINE` job atomically, moves the video from `UPLOADED` to `PROCESSING_BASELINE`, downloads the source object, persists source dimensions via `ffprobe`, inserts the baseline `360p` child job into `transcoding_jobs`, and publishes the baseline transcoder SQS message.
 - The chunker now commits source dimensions, the baseline child job, and any source-eligible additional-rendition jobs in one database transaction so a chunker failure cannot leave a partially dispatched baseline pipeline behind.
-- The baseline transcoder downloads `videos/{video_id}/source/original`, generates `360p` HLS artifacts via `ffmpeg`, writes `videos/{video_id}/hls/master.m3u8`, and uploads artifacts to the processed bucket.
+- The baseline transcoder now consumes the dedicated `360p` SQS queue, claims the referenced `360p` row atomically, downloads `videos/{video_id}/source/original`, generates `360p` HLS artifacts via `ffmpeg`, writes `videos/{video_id}/hls/master.m3u8`, uploads artifacts to the processed bucket, and then releases queued higher-rendition jobs onto their own rendition-specific transcoder queues once baseline playback is available.
 - `BASELINE_READY` is written only after the transcoder has finished the full `360p` VOD package, uploaded the baseline playlist, uploaded the master manifest, uploaded all baseline segments, and persisted `manifest_s3_key`.
 - `GET /api/videos/{publicId}` now exposes `manifestUrl` from shared metadata using `PROCESSED_ASSET_BASE_URL` or `CDN_BASE_URL`.
 - The runtime assets now live inside `chunker/` and `transcoder/` so each service folder can be transferred to its own EC2 instance. Scale `chunker` replicas for dispatch pressure and scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently for rendition-specific load.
@@ -1074,6 +1086,7 @@ Implementation note for `9a`:
 - The API now accepts an optional `x-correlation-id` header, generates one when absent, and echoes it in the response.
 - `processing_jobs` and `transcoding_jobs` now persist `correlation_id`, allowing the upload request, chunker work, and transcoder work to be followed through one shared identifier.
 - `chunker` and `transcoder` now run claimed jobs inside spans that include `correlation_id` plus the relevant job/video fields.
+- The queue transport is now the live execution trigger: backend publishes baseline jobs to `SQS_CHUNKER_QUEUE_URL`, chunker publishes rendition jobs to the matching rendition-specific queue (`SQS_TRANSCODER_360P_QUEUE_URL` through `SQS_TRANSCODER_2160P_QUEUE_URL`), and both workers use Postgres claims as the duplicate-delivery guardrail for standard SQS.
 - The transcoder S3 publish path now logs each processed artifact upload with bucket, key, local file path, and file size so baseline stalls can be distinguished between ffmpeg packaging and processed-bucket publication.
 - The transcoder now uploads rendition segments before the variant playlist and retries/times out individual processed-bucket uploads so transient S3 publish failures do not immediately strand a baseline rendition in `PROCESSING_BASELINE` after ffmpeg has already finished.
 - STG worker Compose definitions now use `network_mode: host` for `chunker` and `transcoder-*` so S3/DB traffic uses the EC2 host network path directly instead of Docker bridge/NAT.

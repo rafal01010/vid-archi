@@ -8,6 +8,7 @@ axum = { version = "0.8", features = ["macros"] }
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
 aws-credential-types = "1"
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 data-encoding = "2"
 dotenvy = "0.15"

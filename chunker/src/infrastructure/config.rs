@@ -8,6 +8,13 @@ pub struct ChunkerConfig {
     pub database_url: String,
     pub aws_region: String,
     pub upload_bucket: String,
+    pub sqs_chunker_queue_url: String,
+    pub sqs_transcoder_360p_queue_url: String,
+    pub sqs_transcoder_480p_queue_url: String,
+    pub sqs_transcoder_720p_queue_url: String,
+    pub sqs_transcoder_1080p_queue_url: String,
+    pub sqs_transcoder_1440p_queue_url: String,
+    pub sqs_transcoder_2160p_queue_url: String,
     pub video_policy_file: PathBuf,
     pub s3_endpoint_url: Option<String>,
     pub s3_force_path_style: bool,
@@ -15,6 +22,8 @@ pub struct ChunkerConfig {
     pub s3_secret_access_key: Option<String>,
     pub chunker_id: String,
     pub poll_interval_seconds: u64,
+    pub sqs_wait_time_seconds: i32,
+    pub sqs_visibility_timeout_seconds: i32,
     pub max_processing_attempts: i32,
     pub chunker_temp_dir: PathBuf,
     pub ffprobe_binary: String,
@@ -34,6 +43,16 @@ impl ChunkerConfig {
         let aws_region = env::var("AWS_REGION").unwrap_or_else(|_| "ap-northeast-1".to_owned());
         let upload_bucket =
             read_bucket_name("UPLOAD_BUCKET", "LOCAL_UPLOAD_BUCKET", "upload bucket")?;
+        let sqs_chunker_queue_url = read_required_env("SQS_CHUNKER_QUEUE_URL")?;
+        let sqs_transcoder_360p_queue_url = read_required_env("SQS_TRANSCODER_360P_QUEUE_URL")?;
+        let sqs_transcoder_480p_queue_url = read_required_env("SQS_TRANSCODER_480P_QUEUE_URL")?;
+        let sqs_transcoder_720p_queue_url = read_required_env("SQS_TRANSCODER_720P_QUEUE_URL")?;
+        let sqs_transcoder_1080p_queue_url =
+            read_required_env("SQS_TRANSCODER_1080P_QUEUE_URL")?;
+        let sqs_transcoder_1440p_queue_url =
+            read_required_env("SQS_TRANSCODER_1440P_QUEUE_URL")?;
+        let sqs_transcoder_2160p_queue_url =
+            read_required_env("SQS_TRANSCODER_2160P_QUEUE_URL")?;
         let video_policy_file = env::var("VIDEO_POLICY_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("config/video_policy.json"));
@@ -56,6 +75,9 @@ impl ChunkerConfig {
                 format!("chunker-{hostname}-{}", std::process::id())
             });
         let poll_interval_seconds = read_env_with_default("CHUNKER_POLL_INTERVAL_SECONDS", 5u64)?;
+        let sqs_wait_time_seconds = read_env_with_default("CHUNKER_SQS_WAIT_TIME_SECONDS", 20i32)?;
+        let sqs_visibility_timeout_seconds =
+            read_env_with_default("CHUNKER_SQS_VISIBILITY_TIMEOUT_SECONDS", 300i32)?;
         let max_processing_attempts =
             read_env_with_default("CHUNKER_MAX_PROCESSING_ATTEMPTS", 3i32)?;
         let chunker_temp_dir = env::var("CHUNKER_TEMP_DIR")
@@ -67,6 +89,13 @@ impl ChunkerConfig {
             database_url,
             aws_region,
             upload_bucket,
+            sqs_chunker_queue_url,
+            sqs_transcoder_360p_queue_url,
+            sqs_transcoder_480p_queue_url,
+            sqs_transcoder_720p_queue_url,
+            sqs_transcoder_1080p_queue_url,
+            sqs_transcoder_1440p_queue_url,
+            sqs_transcoder_2160p_queue_url,
             video_policy_file,
             s3_endpoint_url,
             s3_force_path_style,
@@ -74,11 +103,20 @@ impl ChunkerConfig {
             s3_secret_access_key,
             chunker_id,
             poll_interval_seconds,
+            sqs_wait_time_seconds,
+            sqs_visibility_timeout_seconds,
             max_processing_attempts,
             chunker_temp_dir,
             ffprobe_binary,
         })
     }
+}
+
+fn read_required_env(key: &str) -> AppResult<String> {
+    env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::config(format!("missing {key}")))
 }
 
 fn read_bucket_name(primary_key: &str, local_key: &str, label: &str) -> AppResult<String> {

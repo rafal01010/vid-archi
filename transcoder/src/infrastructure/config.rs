@@ -9,6 +9,7 @@ pub struct TranscoderConfig {
     pub aws_region: String,
     pub upload_bucket: String,
     pub processed_bucket: String,
+    pub sqs_transcoder_queue_url: String,
     pub video_policy_file: PathBuf,
     pub s3_endpoint_url: Option<String>,
     pub s3_force_path_style: bool,
@@ -17,6 +18,8 @@ pub struct TranscoderConfig {
     pub transcoder_id: String,
     pub rendition_name: String,
     pub poll_interval_seconds: u64,
+    pub sqs_wait_time_seconds: i32,
+    pub sqs_visibility_timeout_seconds: i32,
     pub max_transcoding_attempts: i32,
     pub transcoder_temp_dir: PathBuf,
     pub ffmpeg_binary: String,
@@ -41,6 +44,7 @@ impl TranscoderConfig {
             "LOCAL_PROCESSED_BUCKET",
             "processed bucket",
         )?;
+        let sqs_transcoder_queue_url = read_required_env("SQS_TRANSCODER_QUEUE_URL")?;
         let video_policy_file = env::var("VIDEO_POLICY_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("config/video_policy.json"));
@@ -71,6 +75,10 @@ impl TranscoderConfig {
             });
         let poll_interval_seconds =
             read_env_with_default("TRANSCODER_POLL_INTERVAL_SECONDS", 5u64)?;
+        let sqs_wait_time_seconds =
+            read_env_with_default("TRANSCODER_SQS_WAIT_TIME_SECONDS", 20i32)?;
+        let sqs_visibility_timeout_seconds =
+            read_env_with_default("TRANSCODER_SQS_VISIBILITY_TIMEOUT_SECONDS", 3600i32)?;
         let max_transcoding_attempts = read_env_with_default("TRANSCODER_MAX_ATTEMPTS", 3i32)?;
         let transcoder_temp_dir = env::var("TRANSCODER_TEMP_DIR")
             .map(PathBuf::from)
@@ -82,6 +90,7 @@ impl TranscoderConfig {
             aws_region,
             upload_bucket,
             processed_bucket,
+            sqs_transcoder_queue_url,
             video_policy_file,
             s3_endpoint_url,
             s3_force_path_style,
@@ -90,11 +99,20 @@ impl TranscoderConfig {
             transcoder_id,
             rendition_name,
             poll_interval_seconds,
+            sqs_wait_time_seconds,
+            sqs_visibility_timeout_seconds,
             max_transcoding_attempts,
             transcoder_temp_dir,
             ffmpeg_binary,
         })
     }
+}
+
+fn read_required_env(key: &str) -> AppResult<String> {
+    env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::config(format!("missing {key}")))
 }
 
 fn read_bucket_name(primary_key: &str, local_key: &str, label: &str) -> AppResult<String> {

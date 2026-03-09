@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::domain::video_policy::VideoPolicy;
 use crate::error::AppResult;
 use crate::infrastructure::config::ChunkerConfig;
+use crate::infrastructure::message_queue::TranscoderJobMessage;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
     ChunkerFailureDisposition, ChunkerRepository, ClaimedBaselineJob,
@@ -18,17 +19,21 @@ pub enum ChunkerProcessOutcome {
     Dispatched {
         job_id: Uuid,
         video_id: Uuid,
+        transcoder_message: TranscoderJobMessage,
     },
     RetryQueued {
         job_id: Uuid,
         video_id: Uuid,
+        retry_job_id: Uuid,
         next_attempt: i32,
     },
     FailedTerminal {
         job_id: Uuid,
         video_id: Uuid,
     },
-    Idle,
+    Ignored {
+        job_id: Uuid,
+    },
 }
 
 #[derive(Clone)]
@@ -57,13 +62,15 @@ impl ChunkerRuntime {
         }
     }
 
-    pub async fn process_next_job(&self) -> AppResult<ChunkerProcessOutcome> {
+    pub async fn process_job(&self, processing_job_id: Uuid) -> AppResult<ChunkerProcessOutcome> {
         let Some(job) = self
             .repository
-            .claim_next_baseline_job(&self.config.chunker_id)
+            .claim_baseline_job(processing_job_id, &self.config.chunker_id)
             .await?
         else {
-            return Ok(ChunkerProcessOutcome::Idle);
+            return Ok(ChunkerProcessOutcome::Ignored {
+                job_id: processing_job_id,
+            });
         };
 
         let processing_directory = self.processing_directory(&job);
@@ -101,9 +108,10 @@ impl ChunkerRuntime {
         self.cleanup_processing_directory(&processing_directory);
 
         match outcome {
-            Ok(()) => Ok(ChunkerProcessOutcome::Dispatched {
+            Ok(transcoder_message) => Ok(ChunkerProcessOutcome::Dispatched {
                 job_id: job.job_id,
                 video_id: job.video_id,
+                transcoder_message,
             }),
             Err(error) => {
                 let failure = self
@@ -127,7 +135,7 @@ impl ChunkerRuntime {
         &self,
         job: &ClaimedBaselineJob,
         processing_directory: &PathBuf,
-    ) -> AppResult<()> {
+    ) -> AppResult<TranscoderJobMessage> {
         tracing::info!(source_s3_key = %job.source_s3_key, "claimed baseline processing job");
 
         let source_path = processing_directory.join("source").join("original");
@@ -148,7 +156,8 @@ impl ChunkerRuntime {
             additional_rendition_count = additional_renditions.len(),
             "probed source media and prepared transcoding dispatch"
         );
-        self.repository
+        let dispatch_result = self
+            .repository
             .dispatch_transcoding_jobs(
                 job.job_id,
                 job.video_id,
@@ -162,7 +171,14 @@ impl ChunkerRuntime {
             .await?;
         tracing::info!("queued baseline and additional transcoding jobs");
 
-        Ok(())
+        Ok(TranscoderJobMessage {
+            transcoding_job_id: dispatch_result.baseline_transcoding_job_id,
+            processing_job_id: job.job_id,
+            video_id: job.video_id,
+            rendition: baseline_rendition,
+            correlation_id: job.correlation_id.clone(),
+            attempt: job.attempt,
+        })
     }
 
     async fn prepare_processing_directory(&self, processing_directory: &PathBuf) -> AppResult<()> {
@@ -193,10 +209,14 @@ fn map_chunker_failure(
     disposition: ChunkerFailureDisposition,
 ) -> ChunkerProcessOutcome {
     match disposition {
-        ChunkerFailureDisposition::RetryQueued { next_attempt } => {
+        ChunkerFailureDisposition::RetryQueued {
+            retry_job_id,
+            next_attempt,
+        } => {
             ChunkerProcessOutcome::RetryQueued {
                 job_id: job.job_id,
                 video_id: job.video_id,
+                retry_job_id,
                 next_attempt,
             }
         }

@@ -17,6 +17,8 @@ flowchart LR
     DB[(Postgres)]
     Upload[(S3 Upload Bucket)]
     Processed[(S3 Processed Bucket)]
+    ChunkerQueue[(SQS Chunker Queue)]
+    TranscoderQueue[(SQS Transcoder Queue)]
     Chunker[Chunker]
     Transcoder[Transcoder]
     CDN[CloudFront]
@@ -26,9 +28,12 @@ flowchart LR
     Browser --> Upload
     API --> DB
     API --> Upload
+    API --> ChunkerQueue
+    ChunkerQueue --> Chunker
     Chunker --> DB
     Chunker --> Upload
-    Chunker --> DB
+    Chunker --> TranscoderQueue
+    TranscoderQueue --> Transcoder
     Transcoder --> DB
     Transcoder --> Upload
     Transcoder --> Processed
@@ -46,7 +51,9 @@ sequenceDiagram
     participant A as API
     participant S as Upload Bucket
     participant D as Postgres
+    participant Qc as Chunker Queue
     participant C as Chunker
+    participant Qt as Transcoder Queue
     participant T as Transcoder
     participant P as Processed Bucket/CDN
 
@@ -58,14 +65,19 @@ sequenceDiagram
     A-->>U: presigned part URLs
     U->>S: multipart PUT parts
     U->>A: POST /api/videos/{videoId}/complete
-    A->>D: mark UPLOADED + queue BASELINE job
+    A->>D: mark UPLOADED + insert BASELINE job row
+    A->>Qc: send baseline job message
+    Qc->>C: deliver baseline job
     C->>D: claim BASELINE job
     C->>S: download source
-    C->>D: persist source dimensions + queue rendition jobs
+    C->>D: persist source dimensions + insert rendition job rows
+    C->>Qt: send 360p transcoder job
+    Qt->>T: deliver 360p job
     T->>D: claim 360p job
     T->>S: download source
     T->>P: upload 360p playlist, segments, master manifest
     T->>D: mark BASELINE_READY
+    T->>Qt: send higher-rendition jobs
     U->>A: GET /api/videos/{publicId}/playback
     A-->>U: manifestUrl + available qualities
     U->>A: DELETE /api/videos/{publicId} + deleteCode
@@ -79,21 +91,27 @@ sequenceDiagram
 - `backend`
   - owns upload session lifecycle, delete-code hashing/verification, public video lookup, and playback metadata
   - never proxies video bytes
+  - enqueues baseline processing messages onto the chunker SQS queue after upload completion
 - `chunker`
-  - claims parent baseline jobs
+  - consumes the chunker SQS queue
+  - claims parent baseline jobs in Postgres for idempotency
   - probes the source file with `ffprobe`
-  - creates the baseline transcode job and any eligible higher renditions
+  - creates the baseline transcode job and any eligible higher renditions in Postgres
+  - publishes the baseline transcode message to the transcoder SQS queue
 - `transcoder`
+  - consumes the transcoder SQS queue
   - runs one configured rendition per process
   - packages HLS artifacts with `ffmpeg`
   - refreshes `master.m3u8` as renditions finish
+  - updates Postgres as the durable source of truth for playback readiness
 
 ## Scaling And Consistency
 
 - Uploads scale with object storage rather than API CPU or memory.
 - API nodes remain stateless because streamability is derived from Postgres, not local memory.
-- Chunkers scale on queued baseline jobs.
-- Transcoders scale by rendition, which allows heavier qualities such as `1080p` or `2160p` to receive more capacity without affecting baseline throughput.
+- Chunkers scale on chunker-queue depth.
+- Transcoders scale on transcoder-queue depth.
+- Standard SQS delivery is tolerated because Postgres still gates all job claims and status transitions, so duplicate queue deliveries only produce stale messages, not duplicate completed work.
 - `BASELINE_READY` is the first playback milestone. Higher renditions continue in the background under `PROCESSING_FULL`.
 
 ## Anonymous Delete Flow
@@ -128,7 +146,7 @@ Current staging layout:
   - Upload bucket: `stg-video-upload-1a`
   - Processed bucket: `stg-video-processed-1a`
   - Chunker queue: `stg-chunker-queue`
-  - Transcoder queue: `stg-transcoder-queue`
+  - Transcoder queues: `stg-transcoder-{360p,480p,720p,1080p,1440p,2160p}-queue`
 
 ## Ingress Decision
 
