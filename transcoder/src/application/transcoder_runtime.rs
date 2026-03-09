@@ -44,6 +44,7 @@ pub enum TranscoderProcessOutcome {
         transcoding_job_id: uuid::Uuid,
         queue_rendition: String,
         worker_rendition: String,
+        reroute_job_message: TranscoderJobMessage,
     },
 }
 
@@ -82,6 +83,7 @@ impl TranscoderRuntime {
                 transcoding_job_id: queue_message.transcoding_job_id,
                 queue_rendition: queue_message.rendition.clone(),
                 worker_rendition: self.config.rendition_name.clone(),
+                reroute_job_message: queue_message.clone(),
             });
         }
 
@@ -471,22 +473,20 @@ fn map_transcoding_failure(
         TranscodingFailureDisposition::RetryQueued {
             retry_transcoding_job_id,
             next_attempt,
-        } => {
-            TranscoderProcessOutcome::RetryQueued {
-                transcoding_job_id: job.transcoding_job_id,
+        } => TranscoderProcessOutcome::RetryQueued {
+            transcoding_job_id: job.transcoding_job_id,
+            video_id: job.video_id,
+            rendition: job.rendition.clone(),
+            next_attempt,
+            retry_job_message: TranscoderJobMessage {
+                transcoding_job_id: retry_transcoding_job_id,
+                processing_job_id: job.processing_job_id,
                 video_id: job.video_id,
                 rendition: job.rendition.clone(),
-                next_attempt,
-                retry_job_message: TranscoderJobMessage {
-                    transcoding_job_id: retry_transcoding_job_id,
-                    processing_job_id: job.processing_job_id,
-                    video_id: job.video_id,
-                    rendition: job.rendition.clone(),
-                    correlation_id: job.correlation_id.clone(),
-                    attempt: next_attempt,
-                },
-            }
-        }
+                correlation_id: job.correlation_id.clone(),
+                attempt: next_attempt,
+            },
+        },
         TranscodingFailureDisposition::Terminal => TranscoderProcessOutcome::FailedTerminal {
             transcoding_job_id: job.transcoding_job_id,
             video_id: job.video_id,

@@ -15,7 +15,8 @@ use crate::application::{ChunkerProcessOutcome, ChunkerRuntime};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::ChunkerConfig;
 use crate::infrastructure::message_queue::{
-    ChunkerJobMessage, ChunkerQueueConsumer, ChunkerQueuePublisher, TranscoderQueuePublisher,
+    ChunkerJobMessage, ChunkerQueueConsumer, ChunkerQueuePublisher, ReceivedChunkerMessageKind,
+    TranscoderQueuePublisher,
 };
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::ChunkerRepository;
@@ -43,13 +44,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue;
         };
 
-        match runtime.process_job(message.payload.processing_job_id).await {
+        let ReceivedChunkerMessageKind::Job(payload) = message.kind else {
+            let ReceivedChunkerMessageKind::Invalid { reason } = message.kind;
+            queue_consumer.delete(&message.receipt_handle).await?;
+            tracing::warn!(reason = %reason, "chunker deleted invalid queue message");
+            continue;
+        };
+
+        match runtime.process_job(payload.processing_job_id).await {
             Ok(ChunkerProcessOutcome::Dispatched {
                 job_id,
                 video_id,
                 transcoder_message,
             }) => {
-                transcoder_queue_publisher.enqueue(transcoder_message).await?;
+                transcoder_queue_publisher
+                    .enqueue(transcoder_message)
+                    .await?;
                 queue_consumer.delete(&message.receipt_handle).await?;
                 tracing::info!(%job_id, %video_id, "chunker dispatched baseline transcoder job");
             }
@@ -64,7 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let retry_message = ChunkerJobMessage {
                     processing_job_id: retry_job_id,
                     video_id,
-                    correlation_id: message.payload.correlation_id.clone(),
+                    correlation_id: payload.correlation_id.clone(),
                     attempt: next_attempt,
                 };
                 chunker_queue_publisher.enqueue(retry_message).await?;

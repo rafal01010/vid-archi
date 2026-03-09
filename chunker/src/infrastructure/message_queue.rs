@@ -29,8 +29,14 @@ pub struct TranscoderJobMessage {
 
 #[derive(Debug, Clone)]
 pub struct ReceivedChunkerJobMessage {
-    pub payload: ChunkerJobMessage,
+    pub kind: ReceivedChunkerMessageKind,
     pub receipt_handle: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReceivedChunkerMessageKind {
+    Job(ChunkerJobMessage),
+    Invalid { reason: String },
 }
 
 #[derive(Clone)]
@@ -99,15 +105,15 @@ impl ChunkerQueueConsumer {
             return Ok(None);
         };
 
-        let body = message.body().ok_or_else(|| {
-            AppError::internal("received chunker queue message without a body")
-        })?;
-        let payload = serde_json::from_str::<ChunkerJobMessage>(body).map_err(|error| {
-            AppError::internal_with_context(
-                "failed to parse chunker queue message",
-                format!("body={body} error={error}"),
-            )
-        })?;
+        let body = message
+            .body()
+            .ok_or_else(|| AppError::internal("received chunker queue message without a body"))?;
+        let kind = match serde_json::from_str::<ChunkerJobMessage>(body) {
+            Ok(payload) => ReceivedChunkerMessageKind::Job(payload),
+            Err(error) => ReceivedChunkerMessageKind::Invalid {
+                reason: format!("body={body} error={error}"),
+            },
+        };
         let receipt_handle = message
             .receipt_handle()
             .ok_or_else(|| {
@@ -116,7 +122,7 @@ impl ChunkerQueueConsumer {
             .to_owned();
 
         Ok(Some(ReceivedChunkerJobMessage {
-            payload,
+            kind,
             receipt_handle,
         }))
     }

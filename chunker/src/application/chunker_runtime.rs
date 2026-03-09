@@ -212,14 +212,12 @@ fn map_chunker_failure(
         ChunkerFailureDisposition::RetryQueued {
             retry_job_id,
             next_attempt,
-        } => {
-            ChunkerProcessOutcome::RetryQueued {
-                job_id: job.job_id,
-                video_id: job.video_id,
-                retry_job_id,
-                next_attempt,
-            }
-        }
+        } => ChunkerProcessOutcome::RetryQueued {
+            job_id: job.job_id,
+            video_id: job.video_id,
+            retry_job_id,
+            next_attempt,
+        },
         ChunkerFailureDisposition::Terminal => ChunkerProcessOutcome::FailedTerminal {
             job_id: job.job_id,
             video_id: job.video_id,

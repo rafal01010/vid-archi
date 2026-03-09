@@ -10,6 +10,12 @@ pub struct TranscoderConfig {
     pub upload_bucket: String,
     pub processed_bucket: String,
     pub sqs_transcoder_queue_url: String,
+    pub sqs_transcoder_360p_queue_url: String,
+    pub sqs_transcoder_480p_queue_url: String,
+    pub sqs_transcoder_720p_queue_url: String,
+    pub sqs_transcoder_1080p_queue_url: String,
+    pub sqs_transcoder_1440p_queue_url: String,
+    pub sqs_transcoder_2160p_queue_url: String,
     pub video_policy_file: PathBuf,
     pub s3_endpoint_url: Option<String>,
     pub s3_force_path_style: bool,
@@ -46,6 +52,12 @@ impl TranscoderConfig {
             "processed bucket",
         )?;
         let sqs_transcoder_queue_url = read_required_env("SQS_TRANSCODER_QUEUE_URL")?;
+        let sqs_transcoder_360p_queue_url = read_required_env("SQS_TRANSCODER_360P_QUEUE_URL")?;
+        let sqs_transcoder_480p_queue_url = read_required_env("SQS_TRANSCODER_480P_QUEUE_URL")?;
+        let sqs_transcoder_720p_queue_url = read_required_env("SQS_TRANSCODER_720P_QUEUE_URL")?;
+        let sqs_transcoder_1080p_queue_url = read_required_env("SQS_TRANSCODER_1080P_QUEUE_URL")?;
+        let sqs_transcoder_1440p_queue_url = read_required_env("SQS_TRANSCODER_1440P_QUEUE_URL")?;
+        let sqs_transcoder_2160p_queue_url = read_required_env("SQS_TRANSCODER_2160P_QUEUE_URL")?;
         let video_policy_file = env::var("VIDEO_POLICY_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("config/video_policy.json"));
@@ -85,8 +97,7 @@ impl TranscoderConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp/vid-archi-transcoder"));
         let ffmpeg_binary = env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_owned());
-        let enable_aws_cli_s3_fallback =
-            read_env_with_default("ENABLE_AWS_CLI_S3_FALLBACK", true)?;
+        let enable_aws_cli_s3_fallback = read_env_with_default("ENABLE_AWS_CLI_S3_FALLBACK", true)?;
 
         Ok(Self {
             database_url,
@@ -94,6 +105,12 @@ impl TranscoderConfig {
             upload_bucket,
             processed_bucket,
             sqs_transcoder_queue_url,
+            sqs_transcoder_360p_queue_url,
+            sqs_transcoder_480p_queue_url,
+            sqs_transcoder_720p_queue_url,
+            sqs_transcoder_1080p_queue_url,
+            sqs_transcoder_1440p_queue_url,
+            sqs_transcoder_2160p_queue_url,
             video_policy_file,
             s3_endpoint_url,
             s3_force_path_style,

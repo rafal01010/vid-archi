@@ -14,7 +14,9 @@ use dotenvy::dotenv;
 use crate::application::{TranscoderProcessOutcome, TranscoderRuntime};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::TranscoderConfig;
-use crate::infrastructure::message_queue::{TranscoderQueueConsumer, TranscoderQueuePublisher};
+use crate::infrastructure::message_queue::{
+    ReceivedTranscoderMessageKind, TranscoderQueueConsumer, TranscoderQueuePublisher,
+};
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::TranscoderRepository;
 use crate::media::MediaProcessor;
@@ -41,7 +43,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue;
         };
 
-        match runtime.process_job(&message.payload).await {
+        let ReceivedTranscoderMessageKind::Job(payload) = message.kind else {
+            let ReceivedTranscoderMessageKind::Invalid { reason } = message.kind;
+            queue_consumer.delete(&message.receipt_handle).await?;
+            tracing::warn!(reason = %reason, "transcoder deleted invalid queue message");
+            continue;
+        };
+
+        match runtime.process_job(&payload).await {
             Ok(TranscoderProcessOutcome::Processed {
                 transcoding_job_id,
                 video_id,
@@ -92,13 +101,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 transcoding_job_id,
                 queue_rendition,
                 worker_rendition,
+                reroute_job_message,
             }) => {
-                queue_consumer.release(&message.receipt_handle).await?;
+                queue_publisher.enqueue(reroute_job_message).await?;
+                queue_consumer.delete(&message.receipt_handle).await?;
                 tracing::info!(
                     %transcoding_job_id,
                     %queue_rendition,
                     %worker_rendition,
-                    "transcoder released queue message for a different rendition worker"
+                    "transcoder rerouted queue message to the correct rendition queue"
                 );
                 tokio::time::sleep(poll_interval).await;
             }

@@ -384,7 +384,10 @@ pub struct ClaimedBaselineJob {
 
 #[derive(Debug)]
 pub enum ChunkerFailureDisposition {
-    RetryQueued { retry_job_id: Uuid, next_attempt: i32 },
+    RetryQueued {
+        retry_job_id: Uuid,
+        next_attempt: i32,
+    },
     Terminal,
 }
 

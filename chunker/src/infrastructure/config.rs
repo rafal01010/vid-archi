@@ -47,12 +47,9 @@ impl ChunkerConfig {
         let sqs_transcoder_360p_queue_url = read_required_env("SQS_TRANSCODER_360P_QUEUE_URL")?;
         let sqs_transcoder_480p_queue_url = read_required_env("SQS_TRANSCODER_480P_QUEUE_URL")?;
         let sqs_transcoder_720p_queue_url = read_required_env("SQS_TRANSCODER_720P_QUEUE_URL")?;
-        let sqs_transcoder_1080p_queue_url =
-            read_required_env("SQS_TRANSCODER_1080P_QUEUE_URL")?;
-        let sqs_transcoder_1440p_queue_url =
-            read_required_env("SQS_TRANSCODER_1440P_QUEUE_URL")?;
-        let sqs_transcoder_2160p_queue_url =
-            read_required_env("SQS_TRANSCODER_2160P_QUEUE_URL")?;
+        let sqs_transcoder_1080p_queue_url = read_required_env("SQS_TRANSCODER_1080P_QUEUE_URL")?;
+        let sqs_transcoder_1440p_queue_url = read_required_env("SQS_TRANSCODER_1440P_QUEUE_URL")?;
+        let sqs_transcoder_2160p_queue_url = read_required_env("SQS_TRANSCODER_2160P_QUEUE_URL")?;
         let video_policy_file = env::var("VIDEO_POLICY_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("config/video_policy.json"));

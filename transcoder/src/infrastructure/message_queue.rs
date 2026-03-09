@@ -20,8 +20,14 @@ pub struct TranscoderJobMessage {
 
 #[derive(Debug, Clone)]
 pub struct ReceivedTranscoderJobMessage {
-    pub payload: TranscoderJobMessage,
+    pub kind: ReceivedTranscoderMessageKind,
     pub receipt_handle: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReceivedTranscoderMessageKind {
+    Job(TranscoderJobMessage),
+    Invalid { reason: String },
 }
 
 #[derive(Clone)]
@@ -35,7 +41,17 @@ pub struct TranscoderQueueConsumer {
 #[derive(Clone)]
 pub struct TranscoderQueuePublisher {
     client: Client,
-    queue_url: String,
+    queue_urls: RenditionQueueUrls,
+}
+
+#[derive(Clone)]
+struct RenditionQueueUrls {
+    queue_360p: String,
+    queue_480p: String,
+    queue_720p: String,
+    queue_1080p: String,
+    queue_1440p: String,
+    queue_2160p: String,
 }
 
 impl TranscoderQueueConsumer {
@@ -77,12 +93,12 @@ impl TranscoderQueueConsumer {
         let body = message.body().ok_or_else(|| {
             AppError::internal("received transcoder queue message without a body")
         })?;
-        let payload = serde_json::from_str::<TranscoderJobMessage>(body).map_err(|error| {
-            AppError::internal_with_context(
-                "failed to parse transcoder queue message",
-                format!("body={body} error={error}"),
-            )
-        })?;
+        let kind = match serde_json::from_str::<TranscoderJobMessage>(body) {
+            Ok(payload) => ReceivedTranscoderMessageKind::Job(payload),
+            Err(error) => ReceivedTranscoderMessageKind::Invalid {
+                reason: format!("body={body} error={error}"),
+            },
+        };
         let receipt_handle = message
             .receipt_handle()
             .ok_or_else(|| {
@@ -91,7 +107,7 @@ impl TranscoderQueueConsumer {
             .to_owned();
 
         Ok(Some(ReceivedTranscoderJobMessage {
-            payload,
+            kind,
             receipt_handle,
         }))
     }
@@ -141,7 +157,14 @@ impl TranscoderQueuePublisher {
 
         Ok(Self {
             client: Client::new(&shared_config),
-            queue_url: config.sqs_transcoder_queue_url.clone(),
+            queue_urls: RenditionQueueUrls {
+                queue_360p: config.sqs_transcoder_360p_queue_url.clone(),
+                queue_480p: config.sqs_transcoder_480p_queue_url.clone(),
+                queue_720p: config.sqs_transcoder_720p_queue_url.clone(),
+                queue_1080p: config.sqs_transcoder_1080p_queue_url.clone(),
+                queue_1440p: config.sqs_transcoder_1440p_queue_url.clone(),
+                queue_2160p: config.sqs_transcoder_2160p_queue_url.clone(),
+            },
         })
     }
 
@@ -153,19 +176,44 @@ impl TranscoderQueuePublisher {
             )
         })?;
 
+        let queue_url = self
+            .queue_urls
+            .for_rendition(&message.rendition)
+            .ok_or_else(|| {
+                AppError::config(format!(
+                    "no transcoder queue configured for rendition {}",
+                    message.rendition
+                ))
+            })?;
+
         self.client
             .send_message()
-            .queue_url(&self.queue_url)
+            .queue_url(queue_url)
             .message_body(body)
             .send()
             .await
             .map_err(|error| {
                 AppError::internal_with_context(
                     "failed to send transcoder queue message",
-                    format!("queue_url={} error={error:?}", self.queue_url),
+                    format!("queue_url={} error={error:?}", queue_url),
                 )
             })?;
 
         Ok(())
+    }
+}
+
+impl RenditionQueueUrls {
+    fn for_rendition(&self, rendition: &str) -> Option<&str> {
+        match rendition {
+            "360p" => Some(&self.queue_360p),
+            "480p" => Some(&self.queue_480p),
+            "720p" => Some(&self.queue_720p),
+            "1080p" => Some(&self.queue_1080p),
+            "1440p" => Some(&self.queue_1440p),
+            "2160p" => Some(&self.queue_2160p),
+            _ => None,
+        }
+        .map(String::as_str)
     }
 }
