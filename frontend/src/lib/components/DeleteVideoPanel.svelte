@@ -24,8 +24,6 @@
 	$: helperCopy =
 		variant === 'card'
 			? 'Need to remove this upload? Use the delete code from upload time.'
-			: variant === 'list'
-				? 'Delete later with the upload delete code.'
 			: 'Delete this upload if you still have the delete code from upload time.';
 
 	function handleDeleteToggle() {
@@ -59,6 +57,31 @@
 <section class={panelClassName}>
 	{#if deletePhase === 'deleted'}
 		<div class="message message-success">Video deleted.</div>
+	{:else if variant === 'list'}
+		<div class="delete-actions">
+			<button class="delete-toggle list-toggle" type="button" on:click={handleDeleteToggle}>
+				{isFormVisible ? 'Cancel' : 'Delete'}
+			</button>
+		</div>
+
+		{#if isFormVisible}
+			<div class="delete-form">
+				<label class="field-label" for={`delete-code-${publicId}`}>Delete code</label>
+				<input
+					id={`delete-code-${publicId}`}
+					class="input"
+					type="password"
+					placeholder="Enter delete code"
+					bind:value={deleteCode}
+					disabled={isDeleting}
+				/>
+				<div class="delete-actions">
+					<button class="button-danger" type="button" on:click={handleDeleteSubmitted} disabled={isDeleting}>
+						{deleteButtonLabel}
+					</button>
+				</div>
+			</div>
+		{/if}
 	{:else}
 		<div class="delete-summary">
 			<div class="delete-copy-block">
@@ -116,10 +139,11 @@
 	}
 
 	.list-variant {
-		padding: 12px 16px 12px 0;
+		padding: 10px 12px 10px 0;
 		border-radius: 0;
 		background: transparent;
 		border: 0;
+		align-self: center;
 	}
 
 	.delete-summary {
@@ -175,6 +199,11 @@
 		font-size: 0.88rem;
 		font-weight: 600;
 		transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+	}
+
+	.list-toggle {
+		padding: 7px 11px;
+		font-size: 0.8rem;
 	}
 
 	.delete-toggle:hover {

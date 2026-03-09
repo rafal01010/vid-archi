@@ -49,23 +49,22 @@
 			No videos yet. Upload one to get started.
 		</div>
 	{:else}
-		<div class="video-list">
-			{#each videos as video}
-				<article class="video-row">
-					<a class="video-row-link" href={video.playbackPath}>
-						<div class="video-row-copy">
-							<div class="video-row-top">
-								<h3>{video.title || video.originalFilename}</h3>
-								<span class="video-status">{describeVideoStatus(video.status)}</span>
+			<div class="video-list">
+				{#each videos as video}
+					<article class="video-row">
+						<a class="video-row-link" href={video.playbackPath}>
+							<div class="video-row-action">
+								<span class="card-open-button">Open</span>
 							</div>
-							<p class="video-row-meta">Uploaded {formatDate(video.createdAt)}</p>
-							<p class="video-row-hint">Open the video page to watch, copy the link, or check processing.</p>
-						</div>
-						<div class="video-row-action">
-							<span class="card-open-button">Open video</span>
-						</div>
-					</a>
-					<DeleteVideoPanel
+							<div class="video-row-copy">
+								<div class="video-row-top">
+									<h3>{video.title || video.originalFilename}</h3>
+									<span class="video-status">{describeVideoStatus(video.status)}</span>
+								</div>
+								<p class="video-row-meta">Uploaded {formatDate(video.createdAt)}</p>
+							</div>
+						</a>
+						<DeleteVideoPanel
 						publicId={video.publicId}
 						variant="list"
 						on:deleted={handleVideoDeleted}
@@ -144,9 +143,9 @@
 
 	.video-row-link {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: auto minmax(0, 1fr);
 		align-items: center;
-		gap: 16px;
+		gap: 14px;
 		padding: 14px 16px;
 		min-width: 0;
 	}
@@ -175,18 +174,13 @@
 		line-height: 1.25;
 	}
 
-	.video-row-meta,
-	.video-row-hint {
+	.video-row-meta {
 		margin: 0;
 		color: var(--text-muted);
 	}
 
 	.video-row-meta {
 		font-size: 0.82rem;
-	}
-
-	.video-row-hint {
-		font-size: 0.88rem;
 	}
 
 	.video-status {
@@ -206,20 +200,21 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 9px 14px;
+		padding: 8px 12px;
+		min-width: 64px;
 		border-radius: 999px;
-		background: linear-gradient(135deg, #111214 0%, #3a3d42 100%);
+		background: #111214;
 		color: #f7f8fa;
 		font-size: 0.88rem;
 		font-weight: 700;
-		box-shadow: 0 10px 18px rgba(0, 0, 0, 0.16);
+		box-shadow: 0 8px 14px rgba(0, 0, 0, 0.14);
 		transition: transform 140ms ease, box-shadow 140ms ease;
 	}
 
 	.video-row:hover .card-open-button,
 	.video-row-link:focus-visible .card-open-button {
 		transform: translateY(-1px);
-		box-shadow: 0 14px 22px rgba(0, 0, 0, 0.18);
+		box-shadow: 0 10px 18px rgba(0, 0, 0, 0.16);
 	}
 
 	.pagination-row {
@@ -242,7 +237,7 @@
 		}
 
 		.video-row-link {
-			grid-template-columns: 1fr;
+			grid-template-columns: auto 1fr;
 			gap: 12px;
 		}
 	}
