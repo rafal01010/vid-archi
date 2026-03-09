@@ -12,7 +12,7 @@ Current files:
 - `0001_initial_schema.up.sql`
 - `0001_initial_schema.down.sql`
 
-The current project uses a single required bootstrap migration for the full baseline schema. Since all current tables and guardrails are mandatory for the system to run, they are kept together in `0001_initial_schema.*.sql` instead of being split across additional required files.
+The current project uses a single required bootstrap migration for the full schema. Since all current tables and guardrails are mandatory for the system to run, they are kept together in `0001_initial_schema.*.sql` instead of being split across additional required files.
 
 Compatibility note:
 - fresh databases should be bootstrapped from `0001_initial_schema.*.sql`

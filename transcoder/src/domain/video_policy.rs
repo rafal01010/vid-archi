@@ -32,6 +32,34 @@ impl VideoPolicy {
         self.baseline_rendition_profile.name == rendition
     }
 
+    pub fn source_eligible_rendition_names(
+        &self,
+        source_width: u32,
+        source_height: u32,
+    ) -> Vec<String> {
+        let mut renditions = vec![self.baseline_rendition_profile.name.clone()];
+
+        renditions.extend(
+            self.adaptive_rendition_ladder
+                .iter()
+                .filter(|profile| {
+                    profile.name != self.baseline_rendition_profile.name
+                        && profile.width <= source_width
+                        && profile.height <= source_height
+                })
+                .map(|profile| profile.name.clone()),
+        );
+
+        renditions
+    }
+
+    pub fn rendition_ladder_position(&self, rendition: &str) -> usize {
+        self.adaptive_rendition_ladder
+            .iter()
+            .position(|profile| profile.name == rendition)
+            .unwrap_or(usize::MAX)
+    }
+
     pub fn find_rendition_profile(&self, rendition: &str) -> Option<RenditionProfile> {
         if self.baseline_rendition_profile.name == rendition {
             return Some(RenditionProfile {
@@ -188,5 +216,58 @@ mod tests {
         assert_eq!(profile.segment_container, "mpegts");
         assert_eq!(profile.video_codec, "h264");
         assert!(profile.master_playlist_file_name.is_none());
+    }
+
+    #[test]
+    fn source_eligible_renditions_keep_baseline_and_skip_upscale_targets() {
+        let policy = VideoPolicy {
+            baseline_rendition_profile: BaselineRenditionProfile {
+                name: "360p".to_owned(),
+                segment_container: "mpegts".to_owned(),
+                video_codec: "h264".to_owned(),
+                width: 640,
+                height: 360,
+                max_frame_rate: 30,
+                video_bitrate_kbps: 800,
+                audio_bitrate_kbps: 128,
+                segment_duration_seconds: 4,
+                master_playlist_file_name: "master.m3u8".to_owned(),
+                variant_playlist_file_name: "360p.m3u8".to_owned(),
+            },
+            adaptive_rendition_ladder: vec![
+                AdaptiveRenditionProfile {
+                    name: "360p".to_owned(),
+                    width: 640,
+                    height: 360,
+                    video_bitrate_kbps: 800,
+                    audio_bitrate_kbps: 128,
+                    variant_playlist_file_name: "360p.m3u8".to_owned(),
+                },
+                AdaptiveRenditionProfile {
+                    name: "480p".to_owned(),
+                    width: 854,
+                    height: 480,
+                    video_bitrate_kbps: 1400,
+                    audio_bitrate_kbps: 128,
+                    variant_playlist_file_name: "480p.m3u8".to_owned(),
+                },
+                AdaptiveRenditionProfile {
+                    name: "720p".to_owned(),
+                    width: 1280,
+                    height: 720,
+                    video_bitrate_kbps: 2800,
+                    audio_bitrate_kbps: 128,
+                    variant_playlist_file_name: "720p.m3u8".to_owned(),
+                },
+            ],
+        };
+
+        let renditions = policy.source_eligible_rendition_names(1280, 720);
+
+        assert_eq!(renditions, vec!["360p", "480p", "720p"]);
+
+        let renditions = policy.source_eligible_rendition_names(854, 480);
+
+        assert_eq!(renditions, vec!["360p", "480p"]);
     }
 }

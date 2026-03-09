@@ -12,7 +12,7 @@ Responsibilities:
 
 Current implemented behavior:
 - step `5a` through `5d` uses the chunker to dispatch the baseline `360p` transcoding job
-- the non-baseline ladder remains part of step `7`
+- step `7a` now also uses the chunker to queue an `ADDITIONAL_RENDITIONS` parent job plus source-eligible higher renditions
 
 Useful commands:
 

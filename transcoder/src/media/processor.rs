@@ -7,8 +7,6 @@ use crate::domain::video_policy::RenditionProfile;
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::config::TranscoderConfig;
 
-use super::manifest::render_master_manifest;
-
 #[derive(Clone)]
 pub struct MediaProcessor {
     ffmpeg_binary: String,
@@ -26,7 +24,6 @@ impl MediaProcessor {
         source_path: &Path,
         output_root: &Path,
         profile: &RenditionProfile,
-        write_master_manifest: bool,
         source_width: u32,
         source_height: u32,
     ) -> AppResult<PackagedRendition> {
@@ -121,25 +118,15 @@ impl MediaProcessor {
             ));
         }
 
-        let master_manifest_key = if write_master_manifest {
-            let master_playlist_name =
-                profile.master_playlist_file_name.clone().ok_or_else(|| {
-                    AppError::internal("baseline rendition is missing master playlist file name")
-                })?;
-            let master_manifest_path = output_root.join(&master_playlist_name);
-            let master_manifest =
-                render_master_manifest(profile, scaled_resolution.width, scaled_resolution.height);
-            tokio::fs::write(&master_manifest_path, master_manifest).await?;
-            Some(master_playlist_name)
-        } else {
-            None
-        };
-
         Ok(PackagedRendition {
+            rendition: profile.name.clone(),
             codec: profile.video_codec.clone(),
             container: profile.segment_container.clone(),
             playlist_file_name: profile.variant_playlist_file_name.clone(),
-            master_manifest_file_name: master_manifest_key,
+            output_width: scaled_resolution.width,
+            output_height: scaled_resolution.height,
+            target_video_bitrate_kbps: profile.video_bitrate_kbps,
+            target_audio_bitrate_kbps: profile.audio_bitrate_kbps,
             segment_count,
         })
     }
@@ -210,10 +197,14 @@ pub struct ScaledResolution {
 
 #[derive(Debug, Clone)]
 pub struct PackagedRendition {
+    pub rendition: String,
     pub codec: String,
     pub container: String,
     pub playlist_file_name: String,
-    pub master_manifest_file_name: Option<String>,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub target_video_bitrate_kbps: u32,
+    pub target_audio_bitrate_kbps: u32,
     pub segment_count: usize,
 }
 

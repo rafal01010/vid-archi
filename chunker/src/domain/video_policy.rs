@@ -8,6 +8,7 @@ use crate::error::{AppError, AppResult};
 #[serde(rename_all = "camelCase")]
 pub struct VideoPolicy {
     pub baseline_rendition_profile: BaselineRenditionProfile,
+    pub adaptive_rendition_ladder: Vec<AdaptiveRenditionProfile>,
 }
 
 impl VideoPolicy {
@@ -30,10 +31,34 @@ impl VideoPolicy {
     pub fn baseline_rendition_name(&self) -> String {
         self.baseline_rendition_profile.name.clone()
     }
+
+    pub fn source_eligible_additional_renditions(
+        &self,
+        source_width: u32,
+        source_height: u32,
+    ) -> Vec<String> {
+        self.adaptive_rendition_ladder
+            .iter()
+            .filter(|profile| {
+                profile.name != self.baseline_rendition_profile.name
+                    && profile.width <= source_width
+                    && profile.height <= source_height
+            })
+            .map(|profile| profile.name.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BaselineRenditionProfile {
     pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptiveRenditionProfile {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
 }

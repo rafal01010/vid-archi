@@ -189,7 +189,7 @@ Critical design principles:
 Use explicit states in DB. The goal is to distinguish:
 - upload lifecycle
 - first streamable moment
-- background enhancement after the video is already playable
+- background additional renditions after the video is already playable
 - terminal failure
 
 Recommended happy-path transition:
@@ -250,7 +250,7 @@ State definitions:
 State transition rules:
 - Do not return `streamable=true` until manifest exists and status is `BASELINE_READY`, `PROCESSING_FULL`, or `READY`.
 - Treat `BASELINE_READY` as the first streamable milestone and the primary exam success condition.
-- Use `PROCESSING_FULL` only after the video is already playable and background transcoders are continuing enhancement work.
+- Use `PROCESSING_FULL` only after the video is already playable and background transcoders are continuing additional-rendition work.
 - `READY` means all planned renditions for the current MVP ladder are complete.
 - Transition writes must be atomic and idempotent.
 - Chunker/transcoder containers should tolerate duplicate events and repeated queue deliveries.
@@ -315,6 +315,10 @@ Fields:
 - `codec` (e.g. h264)
 - `container` (e.g. fmp4/ts)
 - `playlist_key`
+- `output_width`
+- `output_height`
+- `target_video_bitrate_kbps`
+- `target_audio_bitrate_kbps`
 - `status` (`PROCESSING|READY|FAILED`)
 - `segment_count`
 - `created_at`, `updated_at`
@@ -327,7 +331,7 @@ Constraint:
 Fields:
 - `id`
 - `video_id`
-- `job_type` (`BASELINE|ENHANCE`)
+- `job_type` (`BASELINE|ADDITIONAL_RENDITIONS`)
 - `attempt`
 - `status` (`QUEUED|RUNNING|SUCCEEDED|FAILED`)
 - `worker_id`
@@ -456,14 +460,29 @@ Response:
 `GET /api/videos/{publicId}/playback`
 
 Response:
+- `publicId`
+- `title`
+- `originalFilename`
 - `status`
-- `manifestCdnUrl` when streamable
-- optional `posterUrl`
+- `isStreamable`
+- `playbackPath`
+- `manifestUrl` when streamable
+- `defaultQuality` (`auto`)
+- `pollIntervalMs`
+- optional `availableQualities[]` for fixed-resolution playback
+  - `name`
+  - `label`
+  - `width`
+  - `height`
+  - `codec`
+  - `container`
+  - `playlistUrl`
 
 API impact note for the expanded ladder:
 - No upload API change is required for source-capped multi-resolution support.
-- The HLS master manifest remains the source of truth for which renditions are actually available.
-- A future optional playback response field such as `availableRenditions` may improve frontend status messaging, but it is not required to implement the no-upscaling rule.
+- The HLS master manifest remains the source of truth for `Auto` ABR playback.
+- `availableQualities[]` can be served from ready `video_renditions` metadata so the frontend can lock playback to a specific variant playlist such as `1080p`.
+- Step `7` must keep `video_renditions` readiness and master-manifest updates logically aligned so `Auto` playback and fixed-quality playback converge on the same set of usable renditions.
 
 ### 9.8 Health/readiness
 
@@ -497,7 +516,8 @@ API impact note for the expanded ladder:
 2. Frontend calls playback endpoint.
 3. If `BASELINE_READY/READY`, player fetches master manifest and begins streaming with 360p available immediately.
 4. Player performs ABR variant switching as network/device conditions change (via HLS client behavior).
-5. If not ready, show processing state and poll.
+5. If the user selects a fixed quality such as `720p`, the player swaps from the master manifest URL to that rendition's variant playlist URL.
+6. If not ready, show processing state and poll.
 
 ## 11) Frontend Plan (Svelte)
 
@@ -945,15 +965,41 @@ Implementation note for `5a/5b/5c/5d`:
 - `GET /api/videos/{publicId}` now exposes `manifestUrl` from shared metadata using `PROCESSED_ASSET_BASE_URL` or `CDN_BASE_URL`.
 - The runtime assets now live inside `chunker/` and `transcoder/` so each service folder can be transferred to its own EC2 instance. Scale `chunker` replicas for dispatch pressure and scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently for rendition-specific load.
 
-- [ ] 6a. Implement playback metadata endpoint (`GET /api/videos/{publicId}/playback`).
-- [ ] 6b. Build frontend playback page (`/v/[publicId]`) with status polling.
-- [ ] 6c. Integrate browser playback (native HLS or HLS.js fallback) from manifest URL.
-- [ ] 6d. Enable ABR behavior in player (auto quality selection and variant switching).
+- [x] 6a. Implement playback metadata endpoint (`GET /api/videos/{publicId}/playback`).
+- [x] 6b. Build frontend playback page (`/v/[publicId]`) with status polling.
+- [x] 6c. Integrate browser playback (native HLS or HLS.js fallback) from manifest URL.
+- [x] 6d. Enable ABR behavior in player (auto quality selection and variant switching).
 
-- [ ] 7a. Implement enhancement transcoding pipeline for source-eligible `480p/720p/1080p/1440p/2160p` ABR variants without upscaling.
-- [ ] 7b. Update master manifest safely and transition final status to `READY`.
-- [ ] 7c. Persist rendition metadata in `video_renditions`.
-- [ ] 7d. Configure CDN cache behavior for manifests and segments; validate first-play path via CloudFront URLs.
+Implementation note for `6a/6b/6c/6d`:
+- Backend now exposes `GET /api/videos/{publicId}/playback` as the dedicated share-page/player contract.
+- The playback endpoint returns:
+  - `manifestUrl` for `Auto` ABR playback against the master manifest
+  - `availableQualities[]` built from ready `video_renditions` rows, each with its own fixed-quality `playlistUrl`
+  - `pollIntervalMs` so the frontend can keep polling while more renditions are still processing
+- Playback quality `width` and `height` now come from persisted transcoder output metadata in `video_renditions`, not from assumed ladder dimensions.
+- The schema now also persists target video/audio bitrate metadata for each rendition so step `7` can continue from a more precise source of truth.
+- The frontend playback page now polls that endpoint until the video reaches `READY` or `FAILED`.
+- The browser player now supports:
+  - native HLS where available
+  - HLS.js fallback loaded from CDN for browsers that need JavaScript HLS playback
+  - `Auto` quality by loading the master manifest URL
+  - fixed-resolution quality selection by swapping the player source to the selected rendition playlist URL
+- This design is intentionally aligned with step `7`: once new rendition rows such as `720p` or `1080p` are persisted and the master manifest is expanded, the playback endpoint and player do not need a redesign; they will surface the new options automatically.
+
+- [x] 7a. Implement additional-renditions transcoding pipeline for source-eligible `480p/720p/1080p/1440p/2160p` ABR variants without upscaling.
+- [x] 7b. Update master manifest safely and transition final status to `READY`.
+- [x] 7c. Persist additional-rendition metadata in `video_renditions` and keep actual output dimensions/bitrates aligned with manifest updates.
+- [x] 7d. Configure CDN cache behavior for manifests and segments; validate first-play path via CloudFront URLs.
+
+Implementation note for `7a/7b/7c/7d`:
+- `chunker/` now reads the shared adaptive ladder, keeps the baseline `360p` dispatch, and also inserts one `ADDITIONAL_RENDITIONS` parent job plus source-eligible higher-rendition rows into `transcoding_jobs`.
+- Non-baseline transcoders do not start until the baseline path has already made the video streamable. The first additional-renditions claim moves the video from `BASELINE_READY` to `PROCESSING_FULL`.
+- Every successful rendition rebuilds `videos/{video_id}/hls/master.m3u8` from the current set of ready renditions, uploads the refreshed master manifest, and keeps `Auto` playback aligned with fixed-quality playlist URLs.
+- Additional renditions now persist `codec`, `container`, `playlist_key`, actual encoded `output_width/output_height`, target video/audio bitrate metadata, and `segment_count` in `video_renditions` before their final `READY` transition.
+- When the last planned source-eligible rendition finishes, the video moves to `READY` and the `ADDITIONAL_RENDITIONS` parent job is marked `SUCCEEDED`.
+- For low-resolution source files where no additional rendition is eligible, baseline completion now moves the video directly to `READY`.
+- `7d` is satisfied in code by constructing playback URLs from `CDN_BASE_URL` / `PROCESSED_ASSET_BASE_URL` and by keeping HLS playlist and segment paths relative under `videos/{video_id}/hls/...`, which allows CloudFront to serve both `*.m3u8` and `*.ts` artifacts correctly.
+- If your CloudFront distribution already has a short-TTL behavior for `*.m3u8` and a longer-cache behavior for segment files such as `*.ts` (and optionally `*.m4a` / `*.m4s` for future packaging changes), there is nothing else mandatory for `7d`.
 
 - [ ] 8a. Add idempotent retry policy for chunker/transcoder failures.
 - [ ] 8b. Add terminal failure handling (`FAILED` state, error message surfaces in UI/API).

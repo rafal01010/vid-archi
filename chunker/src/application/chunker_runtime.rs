@@ -101,6 +101,13 @@ impl ChunkerRuntime {
             .queue_transcoding_job(job.job_id, job.video_id, &baseline_rendition)
             .await?;
 
+        let additional_renditions = self
+            .policy
+            .source_eligible_additional_renditions(source_metadata.width, source_metadata.height);
+        self.repository
+            .queue_additional_renditions_jobs(job.video_id, &additional_renditions)
+            .await?;
+
         Ok(())
     }
 

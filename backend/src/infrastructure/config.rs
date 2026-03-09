@@ -81,7 +81,11 @@ impl AppConfig {
 
 impl AppConfig {
     pub fn manifest_url_for_key(&self, manifest_key: &str) -> Option<String> {
-        let normalized_key = manifest_key.trim_start_matches('/');
+        self.asset_url_for_key(manifest_key)
+    }
+
+    pub fn asset_url_for_key(&self, asset_key: &str) -> Option<String> {
+        let normalized_key = asset_key.trim_start_matches('/');
 
         if let Some(base_url) = &self.processed_asset_base_url {
             return Some(format!(

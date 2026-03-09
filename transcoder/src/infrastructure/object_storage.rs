@@ -112,13 +112,18 @@ impl ObjectStorage {
                 relative_path.to_string_lossy().replace('\\', "/")
             );
 
-            self.upload_file(&object_key, &local_path).await?;
+            self.upload_processing_file(&object_key, &local_path)
+                .await?;
         }
 
         Ok(())
     }
 
-    async fn upload_file(&self, object_key: &str, local_path: &Path) -> AppResult<()> {
+    pub async fn upload_processing_file(
+        &self,
+        object_key: &str,
+        local_path: &Path,
+    ) -> AppResult<()> {
         let body = ByteStream::from_path(local_path.to_path_buf())
             .await
             .map_err(|error| {

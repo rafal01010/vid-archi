@@ -6,7 +6,7 @@ use crate::app::AppState;
 use crate::http::dto::{
     CompleteUploadRequest, CompleteUploadResponse, CreateVideoUploadRequest,
     CreateVideoUploadResponse, HealthCheckResponse, ListRecentVideosResponse,
-    SignUploadPartsRequest, SignUploadPartsResponse, VideoDetailsResponse,
+    SignUploadPartsRequest, SignUploadPartsResponse, VideoDetailsResponse, VideoPlaybackResponse,
 };
 use crate::http::error::AppResult;
 use crate::http::query::ListVideosQuery;
@@ -46,6 +46,18 @@ pub async fn get_video_details(
     let response = state
         .video_query_service
         .get_video_details(&public_id)
+        .await?;
+
+    Ok(Json(response.into()))
+}
+
+pub async fn get_video_playback(
+    State(state): State<AppState>,
+    Path(public_id): Path<String>,
+) -> AppResult<Json<VideoPlaybackResponse>> {
+    let response = state
+        .video_query_service
+        .get_video_playback(&public_id)
         .await?;
 
     Ok(Json(response.into()))

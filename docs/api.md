@@ -6,11 +6,13 @@ This document reflects the API currently implemented in the Rust backend and the
 
 1. `GET /api/videos?page=1&pageSize=10`
 2. `GET /api/videos/{publicId}`
+3. `GET /api/videos/{publicId}/playback`
 
 The frontend currently uses these endpoints to:
 - upload a new video from `/`
 - refresh the recent-video library after upload completion
 - open `/v/{publicId}` for share-page status
+- drive the browser player with the dedicated playback contract
 
 ## `GET /api/videos?page=1&pageSize=10`
 
@@ -80,6 +82,88 @@ Response after baseline is ready:
   "updatedAt": "2026-03-08T14:05:30Z",
   "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
   "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8"
+}
+```
+
+## `GET /api/videos/{publicId}/playback`
+
+Returns the player-focused contract for `/v/{publicId}`.
+
+The endpoint behavior is now:
+- resolve the stable `publicId`
+- read shared video state from Postgres
+- read ready rendition rows from `video_renditions`
+- build one `manifestUrl` for `Auto` ABR playback from the master manifest
+- build one `playlistUrl` per ready rendition so the browser can lock playback to a fixed quality
+- expose rendition `width` and `height` from persisted transcoder output metadata instead of assumed policy ladder dimensions
+- expose new qualities as soon as each source-eligible additional rendition reaches `READY`
+- keep the streamable status stable while background processing moves from `BASELINE_READY` to `PROCESSING_FULL` and finally `READY`
+- keep polling cadence server-driven through `pollIntervalMs`
+
+Response while only the baseline rendition is ready:
+
+```json
+{
+  "publicId": "demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "title": "Demo upload",
+  "originalFilename": "demo.mp4",
+  "status": "BASELINE_READY",
+  "isStreamable": true,
+  "createdAt": "2026-03-08T14:00:00Z",
+  "updatedAt": "2026-03-08T14:05:30Z",
+  "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8",
+  "defaultQuality": "auto",
+  "pollIntervalMs": 5000,
+  "availableQualities": [
+    {
+      "name": "360p",
+      "label": "360p",
+      "width": 640,
+      "height": 360,
+      "codec": "h264",
+      "container": "mpegts",
+      "playlistUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/360p/360p.m3u8"
+    }
+  ]
+}
+```
+
+Response after additional renditions have finished:
+
+```json
+{
+  "publicId": "demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "title": "Demo upload",
+  "originalFilename": "demo.mp4",
+  "status": "READY",
+  "isStreamable": true,
+  "createdAt": "2026-03-08T14:00:00Z",
+  "updatedAt": "2026-03-08T14:09:00Z",
+  "playbackPath": "/v/demo-upload-r3t3x2k4r6w34fhx6yzbivskuq",
+  "manifestUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/master.m3u8",
+  "defaultQuality": "auto",
+  "pollIntervalMs": 5000,
+  "availableQualities": [
+    {
+      "name": "360p",
+      "label": "360p",
+      "width": 640,
+      "height": 360,
+      "codec": "h264",
+      "container": "mpegts",
+      "playlistUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/360p/360p.m3u8"
+    },
+    {
+      "name": "720p",
+      "label": "720p",
+      "width": 1280,
+      "height": 720,
+      "codec": "h264",
+      "container": "mpegts",
+      "playlistUrl": "https://d38ixt0cyn1hi6.cloudfront.net/videos/8ee7b885-c177-4438-94f7-f632d4d64af4/hls/720p/720p.m3u8"
+    }
+  ]
 }
 ```
 
@@ -191,5 +275,7 @@ Response:
 - complete upload: `UPLOADED`
 - chunker claim: `PROCESSING_BASELINE`
 - baseline transcoder publishes the full `360p` playlist and its segments: `BASELINE_READY`
+- first additional-renditions transcoder claim after baseline: `PROCESSING_FULL`
+- final source-eligible rendition completes: `READY`
 
-The existing share-page endpoint is the current playback metadata source. Once `manifest_s3_key` is present, it returns `manifestUrl` for the baseline stream.
+The share page now uses `GET /api/videos/{publicId}/playback`. `manifestUrl` powers `Auto` ABR playback, while `availableQualities[].playlistUrl` powers fixed-resolution playback.

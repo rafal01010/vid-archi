@@ -33,9 +33,9 @@ Transcoder container(s) on processing EC2
   -> processed bucket (master manifest, variant playlist, HLS segments)
 
 Browser
-  -> GET /api/videos/{publicId}
+  -> GET /api/videos/{publicId}/playback
      -> Postgres
-     -> manifestUrl derived from processed-asset base URL / CDN base URL
+     -> manifestUrl + rendition playlist URLs derived from processed-asset base URL / CDN base URL
 ```
 
 ## Why It Is Split This Way
@@ -55,13 +55,20 @@ Docker is part of that story. The runtime YAML lives with the service that uses 
 2. `POST /api/videos/{videoId}/parts/sign` returns presigned multipart URLs and moves the video to `UPLOADING` on first use.
 3. `POST /api/videos/{videoId}/complete` finalizes the source upload, sets the video to `UPLOADED`, and inserts a parent `BASELINE` row into `processing_jobs`.
 4. A `chunker` container claims one queued baseline job atomically, marks the parent job `RUNNING`, and moves the video to `PROCESSING_BASELINE`.
-5. The chunker downloads `videos/{video_id}/source/original`, probes source dimensions with `ffprobe`, persists `source_width` and `source_height`, and inserts a child row into `transcoding_jobs` for the baseline rendition.
+5. The chunker downloads `videos/{video_id}/source/original`, probes source dimensions with `ffprobe`, persists `source_width` and `source_height`, inserts a child row into `transcoding_jobs` for the baseline rendition, and queues an `ADDITIONAL_RENDITIONS` parent job plus higher renditions that do not exceed the source resolution.
 6. A `transcoder` container with `TRANSCODER_RENDITION=360p` claims that job, downloads the same source object, runs `ffmpeg` to completion for a VOD package, and writes:
    - `videos/{video_id}/hls/master.m3u8`
    - `videos/{video_id}/hls/360p/360p.m3u8`
    - `videos/{video_id}/hls/360p/segment_*.ts`
-7. After the full `360p` playlist and all of its segments are uploaded to the processed bucket, the transcoder marks the `360p` rendition `READY`, stores `videos.manifest_s3_key`, sets `is_streamable=true`, transitions the video to `BASELINE_READY`, and marks the parent baseline job `SUCCEEDED`.
-8. `GET /api/videos/{publicId}` returns `manifestUrl` only after that shared metadata exists.
+7. After the full `360p` playlist and all of its segments are uploaded to the processed bucket, the transcoder marks the `360p` rendition `READY`, stores `videos.manifest_s3_key`, sets `is_streamable=true`, transitions the video to `BASELINE_READY` or directly to `READY` when no higher renditions are planned, and marks the parent baseline job `SUCCEEDED`.
+8. Higher-rendition transcoders claim their queued rows only after the video is already streamable. The first additional-renditions claim moves the video to `PROCESSING_FULL`.
+9. Every successful rendition rebuilds `videos/{video_id}/hls/master.m3u8` from the current set of ready renditions so `Auto` playback and fixed-quality playback stay aligned.
+10. The last source-eligible additional rendition moves the video to `READY` and marks the `ADDITIONAL_RENDITIONS` parent job `SUCCEEDED`.
+11. `GET /api/videos/{publicId}/playback` returns:
+   - `manifestUrl` for `Auto` adaptive bitrate playback from the master manifest
+   - one `playlistUrl` per ready rendition for fixed-resolution playback such as `360p` or `1080p`
+   - actual encoded rendition dimensions from `video_renditions`, so source-capped variants remain accurate in the UI
+   - a polling interval so the share page can keep discovering new qualities while processing continues
 
 ## State And Queue Guardrails
 
@@ -131,10 +138,10 @@ The deploy scripts are split accordingly:
 
 What is implemented now:
 - baseline `360p` flow through chunker plus transcoder
-- master manifest generation for the baseline stream
-- manifest URL exposure from the existing share-page read endpoint
-
-What remains for step `7`:
-- enqueueing and completing the non-baseline ladder
-- safe master-manifest expansion after baseline
-- final `READY` transition after all planned renditions finish
+- master manifest generation and safe expansion as higher renditions finish
+- dedicated playback endpoint that exposes the master manifest plus ready rendition playlists
+- browser playback page with polling, native HLS support, and HLS.js fallback
+- quality switching design:
+  - `Auto` loads the master manifest and leaves rendition choice to the HLS player
+  - fixed quality loads the selected variant playlist directly so only that resolution is fetched
+- source-capped higher-rendition flow from `BASELINE_READY` to `PROCESSING_FULL` to `READY`

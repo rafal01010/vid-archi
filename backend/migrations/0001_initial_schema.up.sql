@@ -101,7 +101,7 @@ BEGIN
   ) THEN
     CREATE TYPE processing_job_type AS ENUM (
       'BASELINE',
-      'ENHANCE'
+      'ADDITIONAL_RENDITIONS'
     );
   END IF;
 END
@@ -257,11 +257,41 @@ CREATE TABLE IF NOT EXISTS video_renditions (
   codec TEXT NOT NULL,
   container TEXT NOT NULL,
   playlist_key TEXT NOT NULL,
+  output_width INTEGER,
+  output_height INTEGER,
+  target_video_bitrate_kbps INTEGER,
+  target_audio_bitrate_kbps INTEGER,
   status video_rendition_status NOT NULL DEFAULT 'PROCESSING',
   segment_count INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (video_id, rendition),
+  CONSTRAINT video_renditions_output_dimensions_valid
+    CHECK (
+      (
+        output_width IS NULL
+        AND output_height IS NULL
+      )
+      OR (
+        output_width IS NOT NULL
+        AND output_height IS NOT NULL
+        AND output_width > 0
+        AND output_height > 0
+      )
+    ),
+  CONSTRAINT video_renditions_target_bitrates_valid
+    CHECK (
+      (
+        target_video_bitrate_kbps IS NULL
+        AND target_audio_bitrate_kbps IS NULL
+      )
+      OR (
+        target_video_bitrate_kbps IS NOT NULL
+        AND target_audio_bitrate_kbps IS NOT NULL
+        AND target_video_bitrate_kbps > 0
+        AND target_audio_bitrate_kbps > 0
+      )
+    ),
   CONSTRAINT video_renditions_segment_count_valid
     CHECK (segment_count >= 0)
 );

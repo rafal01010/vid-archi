@@ -72,6 +72,7 @@ impl VideoRepository {
         sqlx::query_as::<_, VideoDetailRecord>(
             r#"
             SELECT
+                id,
                 public_id,
                 title,
                 original_filename,
@@ -86,6 +87,28 @@ impl VideoRepository {
         )
         .bind(public_id)
         .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    pub async fn list_ready_renditions(&self, video_id: Uuid) -> AppResult<Vec<ReadyRenditionRecord>> {
+        sqlx::query_as::<_, ReadyRenditionRecord>(
+            r#"
+            SELECT
+                rendition::text AS rendition,
+                codec,
+                container,
+                playlist_key,
+                output_width,
+                output_height
+            FROM video_renditions
+            WHERE video_id = $1
+              AND status = 'READY'::video_rendition_status
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(video_id)
+        .fetch_all(&self.pool)
         .await
         .map_err(AppError::from)
     }
@@ -382,6 +405,7 @@ pub struct VideoSummaryRecord {
 
 #[derive(Debug, FromRow)]
 pub struct VideoDetailRecord {
+    pub id: Uuid,
     pub public_id: String,
     pub title: Option<String>,
     pub original_filename: String,
@@ -390,4 +414,14 @@ pub struct VideoDetailRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub manifest_s3_key: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+pub struct ReadyRenditionRecord {
+    pub rendition: String,
+    pub codec: String,
+    pub container: String,
+    pub playlist_key: String,
+    pub output_width: Option<i32>,
+    pub output_height: Option<i32>,
 }

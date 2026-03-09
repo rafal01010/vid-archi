@@ -152,6 +152,91 @@ impl ChunkerRepository {
         Ok(())
     }
 
+    pub async fn queue_additional_renditions_jobs(
+        &self,
+        video_id: Uuid,
+        rendition_names: &[String],
+    ) -> AppResult<()> {
+        if rendition_names.is_empty() {
+            return Ok(());
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let additional_renditions_job_id = Uuid::new_v4();
+
+        sqlx::query(
+            r#"
+            INSERT INTO processing_jobs (
+                id,
+                video_id,
+                job_type,
+                attempt,
+                status
+            )
+            VALUES (
+                $1,
+                $2,
+                'ADDITIONAL_RENDITIONS'::processing_job_type,
+                1,
+                'QUEUED'::processing_job_status
+            )
+            ON CONFLICT (video_id, job_type, attempt) DO NOTHING
+            "#,
+        )
+        .bind(additional_renditions_job_id)
+        .bind(video_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        let queued_job = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id
+            FROM processing_jobs
+            WHERE video_id = $1
+              AND job_type = 'ADDITIONAL_RENDITIONS'::processing_job_type
+            ORDER BY attempt DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(video_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        for rendition_name in rendition_names {
+            sqlx::query(
+                r#"
+                INSERT INTO transcoding_jobs (
+                    id,
+                    processing_job_id,
+                    video_id,
+                    rendition,
+                    attempt,
+                    status
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4::video_rendition_name,
+                    1,
+                    'QUEUED'::transcoding_job_status
+                )
+                ON CONFLICT (video_id, rendition, attempt) DO NOTHING
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(queued_job)
+            .bind(video_id)
+            .bind(rendition_name)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+
+        Ok(())
+    }
+
     pub async fn mark_chunking_failed(
         &self,
         processing_job_id: Uuid,

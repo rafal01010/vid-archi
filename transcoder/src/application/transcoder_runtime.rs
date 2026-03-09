@@ -6,9 +6,12 @@ use crate::error::{AppError, AppResult};
 use crate::infrastructure::config::TranscoderConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
-    ClaimedTranscodingJob, TranscoderRepository, TranscodingCompletionUpdate,
+    ClaimedTranscodingJob, ReadyManifestVariantRecord, TranscoderRepository,
+    TranscodingCompletionUpdate, VideoProgressUpdate,
 };
-use crate::media::{MediaProcessor, PackagedRendition};
+use crate::media::{
+    render_master_manifest, MasterManifestVariant, MediaProcessor, PackagedRendition,
+};
 
 #[derive(Debug)]
 pub enum TranscoderProcessOutcome {
@@ -47,9 +50,16 @@ impl TranscoderRuntime {
     }
 
     pub async fn process_next_job(&self) -> AppResult<TranscoderProcessOutcome> {
+        let is_baseline_rendition = self
+            .policy
+            .is_baseline_rendition(&self.config.rendition_name);
         let Some(job) = self
             .repository
-            .claim_next_transcoding_job(&self.config.transcoder_id, &self.config.rendition_name)
+            .claim_next_transcoding_job(
+                &self.config.transcoder_id,
+                &self.config.rendition_name,
+                is_baseline_rendition,
+            )
             .await?
         else {
             return Ok(TranscoderProcessOutcome::Idle);
@@ -129,20 +139,10 @@ impl TranscoderRuntime {
                 &source_path,
                 &processing_directory.join("hls"),
                 &rendition_profile,
-                self.policy.is_baseline_rendition(&job.rendition),
                 source_width as u32,
                 source_height as u32,
             )
             .await?;
-
-        self.object_storage
-            .upload_processing_directory(
-                &format!("videos/{}/hls", job.video_id),
-                &processing_directory.join("hls"),
-            )
-            .await?;
-
-        let completion = self.build_completion_update(job, &packaged);
 
         self.repository
             .mark_rendition_processing(
@@ -150,16 +150,80 @@ impl TranscoderRuntime {
                 &job.rendition,
                 &packaged.codec,
                 &packaged.container,
-                &completion.playlist_key,
+                &format!(
+                    "videos/{}/hls/{}/{}",
+                    job.video_id, job.rendition, packaged.playlist_file_name
+                ),
+                packaged.output_width as i32,
+                packaged.output_height as i32,
+                packaged.target_video_bitrate_kbps as i32,
+                packaged.target_audio_bitrate_kbps as i32,
             )
             .await?;
 
-        self.repository
-            .mark_transcoding_succeeded(
-                completion,
-                self.policy.is_baseline_rendition(&job.rendition),
+        self.object_storage
+            .upload_processing_directory(
+                &format!("videos/{}/hls/{}", job.video_id, job.rendition),
+                &processing_directory.join("hls").join(&job.rendition),
             )
             .await?;
+
+        let mut completion_session = self
+            .repository
+            .begin_video_completion_session(job.video_id)
+            .await?;
+        let completion_result = async {
+            let existing_ready_variants = self
+                .repository
+                .list_ready_manifest_variants_in_session(&mut completion_session, job.video_id)
+                .await?;
+            let manifest_variants = self.build_master_manifest_variants(
+                job.video_id,
+                &packaged,
+                existing_ready_variants,
+            );
+            let master_manifest_key = self
+                .write_master_manifest(job.video_id, processing_directory, &manifest_variants)
+                .await?;
+            self.object_storage
+                .upload_processing_file(
+                    &master_manifest_key,
+                    &processing_directory.join("hls").join("master.m3u8"),
+                )
+                .await?;
+
+            let video_progress = self.determine_video_progress_update(
+                job,
+                source_width as u32,
+                source_height as u32,
+                &manifest_variants,
+                &master_manifest_key,
+            );
+            let completion = self.build_completion_update(job, &packaged);
+
+            self.repository
+                .mark_transcoding_succeeded_in_session(
+                    &mut completion_session,
+                    completion,
+                    video_progress,
+                )
+                .await
+        }
+        .await;
+
+        match completion_result {
+            Ok(()) => {
+                self.repository
+                    .commit_video_completion_session(completion_session)
+                    .await?;
+            }
+            Err(error) => {
+                self.repository
+                    .rollback_video_completion_session(completion_session)
+                    .await?;
+                return Err(error);
+            }
+        }
 
         Ok(())
     }
@@ -180,12 +244,98 @@ impl TranscoderRuntime {
                 "videos/{}/hls/{}/{}",
                 job.video_id, job.rendition, packaged.playlist_file_name
             ),
+            output_width: packaged.output_width as i32,
+            output_height: packaged.output_height as i32,
+            target_video_bitrate_kbps: packaged.target_video_bitrate_kbps as i32,
+            target_audio_bitrate_kbps: packaged.target_audio_bitrate_kbps as i32,
             segment_count: packaged.segment_count as i32,
-            manifest_s3_key: packaged
-                .master_manifest_file_name
-                .as_deref()
-                .map(|file_name| format!("videos/{}/hls/{}", job.video_id, file_name)),
         }
+    }
+
+    fn build_master_manifest_variants(
+        &self,
+        video_id: uuid::Uuid,
+        packaged: &PackagedRendition,
+        existing_ready_variants: Vec<ReadyManifestVariantRecord>,
+    ) -> Vec<MasterManifestVariant> {
+        let mut variants = existing_ready_variants
+            .into_iter()
+            .filter_map(|variant| {
+                Some(MasterManifestVariant {
+                    rendition: variant.rendition,
+                    playlist_path: relative_playlist_path(video_id, &variant.playlist_key)?,
+                    width: variant.output_width? as u32,
+                    height: variant.output_height? as u32,
+                    video_bitrate_kbps: variant.target_video_bitrate_kbps? as u32,
+                    audio_bitrate_kbps: variant.target_audio_bitrate_kbps? as u32,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        variants.retain(|variant| variant.rendition != packaged.rendition);
+        variants.push(MasterManifestVariant {
+            rendition: packaged.rendition.clone(),
+            playlist_path: format!("{}/{}", packaged.rendition, packaged.playlist_file_name),
+            width: packaged.output_width,
+            height: packaged.output_height,
+            video_bitrate_kbps: packaged.target_video_bitrate_kbps,
+            audio_bitrate_kbps: packaged.target_audio_bitrate_kbps,
+        });
+        variants.sort_by_key(|variant| self.policy.rendition_ladder_position(&variant.rendition));
+        variants
+    }
+
+    async fn write_master_manifest(
+        &self,
+        video_id: uuid::Uuid,
+        processing_directory: &PathBuf,
+        manifest_variants: &[MasterManifestVariant],
+    ) -> AppResult<String> {
+        let manifest_path = processing_directory.join("hls").join("master.m3u8");
+        let manifest_body = render_master_manifest(manifest_variants);
+        tokio::fs::write(&manifest_path, manifest_body).await?;
+
+        Ok(format!("videos/{}/hls/master.m3u8", video_id))
+    }
+
+    fn determine_video_progress_update(
+        &self,
+        job: &ClaimedTranscodingJob,
+        source_width: u32,
+        source_height: u32,
+        ready_manifest_variants: &[MasterManifestVariant],
+        master_manifest_key: &str,
+    ) -> VideoProgressUpdate {
+        let planned_renditions = self
+            .policy
+            .source_eligible_rendition_names(source_width, source_height);
+        let completed_renditions = ready_manifest_variants
+            .iter()
+            .map(|variant| variant.rendition.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let all_planned_renditions_ready = planned_renditions
+            .iter()
+            .all(|rendition| completed_renditions.contains(rendition.as_str()));
+
+        if self.policy.is_baseline_rendition(&job.rendition) {
+            if all_planned_renditions_ready {
+                return VideoProgressUpdate::Ready {
+                    manifest_s3_key: master_manifest_key.to_owned(),
+                };
+            }
+
+            return VideoProgressUpdate::BaselineReady {
+                manifest_s3_key: master_manifest_key.to_owned(),
+            };
+        }
+
+        if all_planned_renditions_ready {
+            return VideoProgressUpdate::Ready {
+                manifest_s3_key: master_manifest_key.to_owned(),
+            };
+        }
+
+        VideoProgressUpdate::RenditionReadyOnly
     }
 
     async fn prepare_processing_directory(&self, processing_directory: &PathBuf) -> AppResult<()> {
@@ -211,4 +361,9 @@ impl TranscoderRuntime {
             }
         });
     }
+}
+
+fn relative_playlist_path(video_id: uuid::Uuid, playlist_key: &str) -> Option<String> {
+    let prefix = format!("videos/{video_id}/hls/");
+    playlist_key.strip_prefix(&prefix).map(str::to_owned)
 }

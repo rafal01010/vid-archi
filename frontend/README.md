@@ -35,7 +35,13 @@ Avoid inventing alternate UI-only status names when the backend already has a pr
   - progress reporting during part uploads
   - share-link display after upload completion
 - The homepage library calls `GET /api/videos` and renders videos newest first.
-- Clicking a library card opens `/v/[publicId]`, which calls `GET /api/videos/{publicId}` and shows the current lifecycle state.
+- Clicking a library card opens `/v/[publicId]`, which calls `GET /api/videos/{publicId}/playback`.
+- The playback page polls while the video is still processing so new renditions can appear without a reload.
+- The playback page uses:
+  - `manifestUrl` for `Auto` adaptive bitrate playback
+  - `availableQualities[].playlistUrl` for fixed-quality playback such as `360p` or `1080p`
+  - native HLS when the browser supports it
+  - an HLS.js CDN fallback when the browser needs JavaScript-based HLS support
 - The UI theme is monochrome only: black, white, and gray.
 
 ## Local Run

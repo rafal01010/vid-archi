@@ -74,12 +74,11 @@ That keeps `chunker/` and `transcoder/` independently deployable while still let
 1. `POST /api/videos` validates input, creates metadata, and opens a multipart upload.
 2. `POST /api/videos/{videoId}/parts/sign` returns presigned part URLs.
 3. `POST /api/videos/{videoId}/complete` finalizes the source upload, marks the video `UPLOADED`, and inserts a parent `BASELINE` row into `processing_jobs`.
-4. A `chunker` container atomically claims that baseline job, moves the video to `PROCESSING_BASELINE`, downloads the source object, runs `ffprobe`, stores source dimensions, and inserts one row into `transcoding_jobs` for the baseline `360p` rendition.
-5. A `transcoder` container that is configured for `TRANSCODER_RENDITION=360p` claims that job, runs `ffmpeg` to completion for a full VOD-style `360p` package, uploads `videos/{video_id}/hls/master.m3u8`, `videos/{video_id}/hls/360p/360p.m3u8`, and all HLS segments into the processed bucket, then marks the rendition `READY`.
-6. Only after that full baseline package exists does the transcoder set `videos.manifest_s3_key`, `is_streamable=true`, and `status=BASELINE_READY`.
-7. `GET /api/videos/{publicId}` returns `manifestUrl` only after that shared DB state is present.
-
-The code already supports per-rendition transcoder containers. Step `7a` through `7d` in the plan still covers finishing the non-baseline renditions and final `READY` state.
+4. A `chunker` container atomically claims that baseline job, moves the video to `PROCESSING_BASELINE`, downloads the source object, runs `ffprobe`, stores source dimensions, inserts the baseline `360p` row into `transcoding_jobs`, and also queues one `ADDITIONAL_RENDITIONS` parent job plus source-eligible higher renditions such as `480p`, `720p`, or `1080p`.
+5. A `transcoder` container that is configured for `TRANSCODER_RENDITION=360p` claims the baseline row, runs `ffmpeg` to completion for a full VOD-style `360p` package, uploads `videos/{video_id}/hls/master.m3u8`, `videos/{video_id}/hls/360p/360p.m3u8`, and all baseline HLS segments into the processed bucket, then marks the rendition `READY`.
+6. Only after that full baseline package exists does the transcoder set `videos.manifest_s3_key`, `is_streamable=true`, and move the video to `BASELINE_READY` or directly to `READY` when no higher source-eligible renditions exist.
+7. Higher-rendition transcoders start only after the video is already streamable. Their first claim moves the video to `PROCESSING_FULL`, each successful rendition rebuilds and overwrites `master.m3u8`, and the last planned rendition moves the video to `READY`.
+8. `GET /api/videos/{publicId}` and `GET /api/videos/{publicId}/playback` return CloudFront-backed `manifestUrl` values only from shared DB state, never from local worker memory.
 
 ## Scripts
 
@@ -125,15 +124,25 @@ Implemented now:
 - deterministic public share links
 - homepage recent-video listing
 - share-page metadata endpoint
+- dedicated playback metadata endpoint
 - split processing pipeline for `chunker` and `transcoder`
 - per-service Docker runtime files inside `chunker/` and `transcoder/`
 - baseline `360p` HLS generation and `BASELINE_READY` gating
+- source-eligible additional-rendition dispatch for `480p/720p/1080p/1440p/2160p`
+- safe master-manifest expansion as renditions finish
+- final `READY` transition when the source-eligible ladder completes
+- browser playback page with status polling
+- `Auto` ABR playback through the master manifest plus fixed-resolution playback through rendition playlists
 
 Still pending:
-- dedicated playback metadata endpoint from step `6a`
-- browser HLS playback integration from step `6b` to `6d`
-- non-baseline rendition production flow from step `7a` to `7d`
 - retry/metrics/health work from later steps
+
+Playback switching model:
+- `GET /api/videos/{publicId}/playback` returns `manifestUrl` for `Auto` playback and `availableQualities[].playlistUrl` for fixed resolutions.
+- `availableQualities[].width` and `availableQualities[].height` now come from persisted transcoder output metadata, not assumed ladder dimensions.
+- while additional renditions are still running, the endpoint keeps the video streamable and reports `status=PROCESSING_FULL`
+- In the browser player, choosing `Auto` loads the master manifest and lets the HLS engine adapt bitrate.
+- Choosing a specific resolution such as `1080p` swaps the player source to that rendition playlist, which locks playback to that quality until the viewer switches back to `Auto`.
 
 ## Tests
 

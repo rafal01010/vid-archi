@@ -25,6 +25,7 @@ scripts/           deploy/run helpers
 - `POST /api/videos`
 - `GET /api/videos`
 - `GET /api/videos/{publicId}`
+- `GET /api/videos/{publicId}/playback`
 - `POST /api/videos/{videoId}/parts/sign`
 - `POST /api/videos/{videoId}/complete`
 - `GET /healthz`
@@ -57,6 +58,13 @@ scripts/           deploy/run helpers
 - exposes `manifestUrl` only after the baseline transcoder has published HLS artifacts and set `manifest_s3_key`
 - builds that URL from `PROCESSED_ASSET_BASE_URL`, `CDN_BASE_URL`, or the local S3-compatible base
 
+`GET /api/videos/{publicId}/playback`:
+- returns the player-specific contract used by `/v/[publicId]`
+- exposes `manifestUrl` for `Auto` ABR playback
+- exposes `availableQualities[].playlistUrl` for fixed-quality playback
+- reads ready rendition rows from `video_renditions` and orders them by the shared video policy ladder
+- returns `pollIntervalMs` so the share page can refresh while higher qualities are still processing
+
 ## Processing Contract
 
 The backend does not run media processing. It hands work off to the processing side through database state:
@@ -68,7 +76,7 @@ Current baseline path:
 2. `chunker` claims it and persists source dimensions
 3. `chunker` inserts a `360p` child row into `transcoding_jobs`
 4. `transcoder-360p` produces the baseline HLS package
-5. share-page reads `manifestUrl` only after `BASELINE_READY`
+5. share-page reads playback metadata only after `BASELINE_READY`
 
 ## Local Run
 

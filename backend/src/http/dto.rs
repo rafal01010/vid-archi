@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::application::{
     CompleteUploadCommand, CompletedUploadPartInput, CreateVideoUploadCommand,
     CreateVideoUploadResult, ListRecentVideosResult, SignUploadPartsCommand, SignUploadPartsResult,
-    VideoDetailsResult,
+    VideoDetailsResult, VideoPlaybackResult,
 };
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +230,66 @@ impl From<VideoDetailsResult> for VideoDetailsResponse {
             updated_at: value.updated_at,
             playback_path: value.playback_path,
             manifest_url: value.manifest_url,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackQualityResponse {
+    pub name: String,
+    pub label: String,
+    pub width: u32,
+    pub height: u32,
+    pub codec: String,
+    pub container: String,
+    pub playlist_url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPlaybackResponse {
+    pub public_id: String,
+    pub title: Option<String>,
+    pub original_filename: String,
+    pub status: String,
+    pub is_streamable: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub playback_path: String,
+    pub manifest_url: Option<String>,
+    pub default_quality: String,
+    pub poll_interval_ms: u64,
+    pub available_qualities: Vec<PlaybackQualityResponse>,
+}
+
+impl From<VideoPlaybackResult> for VideoPlaybackResponse {
+    fn from(value: VideoPlaybackResult) -> Self {
+        Self {
+            public_id: value.public_id,
+            title: value.title,
+            original_filename: value.original_filename,
+            status: value.status,
+            is_streamable: value.is_streamable,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            playback_path: value.playback_path,
+            manifest_url: value.manifest_url,
+            default_quality: value.default_quality,
+            poll_interval_ms: value.poll_interval_ms,
+            available_qualities: value
+                .available_qualities
+                .into_iter()
+                .map(|quality| PlaybackQualityResponse {
+                    name: quality.name,
+                    label: quality.label,
+                    width: quality.width,
+                    height: quality.height,
+                    codec: quality.codec,
+                    container: quality.container,
+                    playlist_url: quality.playlist_url,
+                })
+                .collect(),
         }
     }
 }

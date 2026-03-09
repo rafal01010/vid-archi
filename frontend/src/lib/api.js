@@ -38,6 +38,10 @@ export function getVideoDetails(publicId) {
 	return sendJsonRequest(`/api/videos/${encodeURIComponent(publicId)}`);
 }
 
+export function getVideoPlayback(publicId) {
+	return sendJsonRequest(`/api/videos/${encodeURIComponent(publicId)}/playback`);
+}
+
 export function createVideoUpload(payload) {
 	return sendJsonRequest('/api/videos', {
 		method: 'POST',

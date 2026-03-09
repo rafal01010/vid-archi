@@ -41,6 +41,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(handlers::get_video_details),
         )
         .route(
+            "/api/videos/{public_id}/playback",
+            axum::routing::get(handlers::get_video_playback),
+        )
+        .route(
             "/api/videos/{video_id}/parts/sign",
             axum::routing::post(handlers::sign_upload_parts),
         )
