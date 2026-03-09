@@ -9,6 +9,7 @@ HOST="0.0.0.0"
 PORT=""
 LOG_DIR="${REPO_ROOT}/logs"
 BACKGROUND=0
+PID_FILE="${LOG_DIR}/frontend.pid"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -57,14 +58,37 @@ elif [[ -n "${STG_ALB_DNS:-}" ]]; then
   export PUBLIC_API_BASE_URL="${PUBLIC_API_BASE_URL:-http://${STG_ALB_DNS}}"
 fi
 
+if [[ -n "${STG_ALB_DNS:-}" ]]; then
+  export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="${STG_ALB_DNS}"
+fi
+
+stop_existing_frontend() {
+  if [[ ! -f "${PID_FILE}" ]]; then
+    return
+  fi
+
+  local existing_pid
+  existing_pid="$(cat "${PID_FILE}")"
+
+  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" >/dev/null 2>&1; then
+    echo "Stopping existing frontend process ${existing_pid}"
+    kill "${existing_pid}" >/dev/null 2>&1 || true
+    wait "${existing_pid}" 2>/dev/null || true
+  fi
+
+  rm -f "${PID_FILE}"
+}
+
 echo "Starting built frontend preview server on http://${HOST}:${PORT}"
 echo "Using PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-<same-origin-relative-with-reverse-proxy>}"
 
+mkdir -p "${LOG_DIR}"
+stop_existing_frontend
+
 if [[ "${BACKGROUND}" == "1" ]]; then
-  mkdir -p "${LOG_DIR}"
   nohup npm run preview -- --host "${HOST}" --port "${PORT}" > "${LOG_DIR}/frontend.log" 2>&1 &
-  echo $! > "${LOG_DIR}/frontend.pid"
-  echo "Frontend PID $(cat "${LOG_DIR}/frontend.pid")"
+  echo $! > "${PID_FILE}"
+  echo "Frontend PID $(cat "${PID_FILE}")"
 else
   exec npm run preview -- --host "${HOST}" --port "${PORT}"
 fi

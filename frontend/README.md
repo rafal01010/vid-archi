@@ -79,7 +79,7 @@ Script helpers:
 The scripts:
 - load env vars from `.env` by default or from `--env-file`
 - export `PUBLIC_API_BASE_URL` before running npm commands
-- allow the STG frontend preview server to accept the `Host` header derived from `STG_ALB_DNS` or `PUBLIC_API_BASE_URL`
+- allow the STG frontend preview server to accept the `Host` header derived from `STG_ALB_DNS`, `PUBLIC_API_BASE_URL`, and the Vite fallback env var `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`
 - support local development and STG build/start handoff on EC2
 - default to `http://${STG_ALB_DNS}` in STG when that value exists
 - fall back to same-origin relative `/api` only when you intentionally deploy a reverse proxy that fronts both the frontend and API on one origin

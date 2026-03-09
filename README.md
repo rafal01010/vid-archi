@@ -52,6 +52,11 @@ Every API request accepts an optional `x-correlation-id` header. If the client d
 
 The staging host scripts package binaries, build images where needed, and start the services with environment-driven configuration.
 
+For STG app-host redeploys:
+- use `./scripts/stg/deploy-stg-app-host.sh --env-file .env` when backend and frontend both changed
+- use `./frontend/scripts/deploy-frontend.sh --env-file .env` followed by `./frontend/scripts/run-stg-frontend.sh --env-file .env --background` when only frontend code changed
+- use `./backend/scripts/deploy-backend.sh` followed by `./backend/scripts/run-stg-api.sh --env-file .env --background` when only backend code changed
+
 ## STG Access
 
 - Through the ALB, open `http://<STG_ALB_DNS>`. In the current staging docs example, that is `http://stg-api-alb-816249004.ap-northeast-1.elb.amazonaws.com`.

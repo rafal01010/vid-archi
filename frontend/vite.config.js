@@ -1,5 +1,5 @@
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 
 function normalizeAllowedHost(value) {
 	if (!value) {
@@ -16,20 +16,31 @@ function normalizeAllowedHost(value) {
 	}
 }
 
-const allowedHosts = Array.from(
-	new Set(
-		[process.env.STG_ALB_DNS, process.env.PUBLIC_API_BASE_URL]
-			.map(normalizeAllowedHost)
-			.filter(Boolean)
-	)
-);
+export default defineConfig(({ mode }) => {
+	const env = {
+		...loadEnv(mode, process.cwd(), ''),
+		...process.env
+	};
+	const allowedHosts = Array.from(
+		new Set(
+			[
+				env.STG_ALB_DNS,
+				env.PUBLIC_API_BASE_URL,
+				env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+			]
+				.flatMap((value) => String(value ?? '').split(','))
+				.map(normalizeAllowedHost)
+				.filter(Boolean)
+		)
+	);
 
-export default defineConfig({
-	plugins: [sveltekit()],
-	server: {
-		allowedHosts
-	},
-	preview: {
-		allowedHosts
-	}
+	return {
+		plugins: [sveltekit()],
+		server: {
+			allowedHosts
+		},
+		preview: {
+			allowedHosts
+		}
+	};
 });
