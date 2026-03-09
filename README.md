@@ -51,6 +51,7 @@ Every API request accepts an optional `x-correlation-id` header. If the client d
 - Transcoder host deploy: `./scripts/stg/deploy-stg-transcoder-host.sh`
 
 The staging host scripts package binaries, build images where needed, and start the services with environment-driven configuration.
+The app-host start scripts now verify that backend/frontend really bind `8080`/`4173`; if startup fails, the deploy exits with recent log output instead of pretending success.
 
 For STG app-host redeploys:
 - use `./scripts/stg/deploy-stg-app-host.sh --env-file .env` when backend and frontend both changed

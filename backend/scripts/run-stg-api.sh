@@ -113,6 +113,26 @@ stop_port_listener() {
   fi
 }
 
+wait_for_startup() {
+  local pid="$1"
+  local port="$2"
+  local label="$3"
+  local startup_deadline=15
+
+  for (( attempt=1; attempt<=startup_deadline; attempt++ )); do
+    if kill -0 "${pid}" >/dev/null 2>&1 && [[ -n "$(find_listening_pid "${port}")" ]]; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "${label} failed to start on port ${port}. Recent log output:"
+  tail -n 50 "${LOG_DIR}/backend.log" 2>/dev/null || true
+  rm -f "${PID_FILE}"
+  return 1
+}
+
 stop_existing_backend
 stop_port_listener "${API_PORT:-8080}" "backend"
 
@@ -127,6 +147,7 @@ if [[ "${BACKGROUND}" == "1" ]]; then
   nohup "${DIST_DIR}/vid-archi-backend" > "${LOG_DIR}/backend.log" 2>&1 &
   echo $! > "${PID_FILE}"
   echo "Backend PID $(cat "${PID_FILE}")"
+  wait_for_startup "$(cat "${PID_FILE}")" "${API_PORT:-8080}" "Backend API"
 else
   exec "${DIST_DIR}/vid-archi-backend"
 fi

@@ -119,6 +119,26 @@ stop_port_listener() {
   fi
 }
 
+wait_for_startup() {
+  local pid="$1"
+  local port="$2"
+  local label="$3"
+  local startup_deadline=15
+
+  for (( attempt=1; attempt<=startup_deadline; attempt++ )); do
+    if kill -0 "${pid}" >/dev/null 2>&1 && [[ -n "$(find_listening_pid "${port}")" ]]; then
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "${label} failed to start on port ${port}. Recent log output:"
+  tail -n 50 "${LOG_DIR}/frontend.log" 2>/dev/null || true
+  rm -f "${PID_FILE}"
+  return 1
+}
+
 echo "Starting built frontend preview server on http://${HOST}:${PORT}"
 echo "Using PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-<same-origin-relative-with-reverse-proxy>}"
 
@@ -136,6 +156,7 @@ if [[ "${BACKGROUND}" == "1" ]]; then
   nohup npm run preview -- --host "${HOST}" --port "${PORT}" --strictPort > "${LOG_DIR}/frontend.log" 2>&1 &
   echo $! > "${PID_FILE}"
   echo "Frontend PID $(cat "${PID_FILE}")"
+  wait_for_startup "$(cat "${PID_FILE}")" "${PORT}" "Frontend preview server"
 else
   exec npm run preview -- --host "${HOST}" --port "${PORT}" --strictPort
 fi
