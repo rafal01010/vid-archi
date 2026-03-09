@@ -79,13 +79,54 @@ stop_existing_frontend() {
   rm -f "${PID_FILE}"
 }
 
+find_listening_pid() {
+  local port="$1"
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -t -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | head -n1
+    return
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "( sport = :${port} )" 2>/dev/null \
+      | grep -o 'pid=[0-9]\+' \
+      | head -n1 \
+      | cut -d= -f2
+  fi
+}
+
+stop_port_listener() {
+  local port="$1"
+  local label="$2"
+  local listener_pid
+
+  listener_pid="$(find_listening_pid "${port}")"
+
+  if [[ -z "${listener_pid}" ]]; then
+    return
+  fi
+
+  echo "Stopping ${label} port listener ${listener_pid} on ${port}"
+  kill "${listener_pid}" >/dev/null 2>&1 || true
+  wait "${listener_pid}" 2>/dev/null || true
+  sleep 1
+
+  listener_pid="$(find_listening_pid "${port}")"
+  if [[ -n "${listener_pid}" ]]; then
+    echo "Force stopping ${label} port listener ${listener_pid} on ${port}"
+    kill -9 "${listener_pid}" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+}
+
 echo "Starting built frontend preview server on http://${HOST}:${PORT}"
 echo "Using PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL:-<same-origin-relative-with-reverse-proxy>}"
 
 mkdir -p "${LOG_DIR}"
 stop_existing_frontend
+stop_port_listener "${PORT}" "frontend"
 
-if command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :${PORT} )" | grep -q ":${PORT}"; then
+if [[ -n "$(find_listening_pid "${PORT}")" ]]; then
   echo "Frontend port ${PORT} is already in use."
   echo "Stop the conflicting process before starting the STG frontend preview server."
   exit 1

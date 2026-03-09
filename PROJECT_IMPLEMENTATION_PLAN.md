@@ -943,7 +943,7 @@ First-time deployment commands:
 Operational note:
 - On STG hosts, install Docker Engine plus Compose v2, then run `sudo systemctl enable --now docker` before invoking the host deploy scripts.
 - On the STG app host, backend/frontend are started as background processes rather than Docker containers; verify them with `ps -fp "$(cat logs/backend.pid)"`, `ps -fp "$(cat logs/frontend.pid)"`, and the `logs/*.log` files.
-- Before app-host deploy/restart commands, check port occupancy with `ss -ltnp | grep -E ':(4173|8080)\b' || true` so stale listeners do not force the frontend off the ALB port.
+- The app-host start scripts now reclaim ports `4173` and `8080` automatically from stale same-user listeners before starting the new frontend/backend process.
 - Browser access uses `http://<STG_ALB_DNS>` when the ALB rules are ready, or `http://<APP_EC2_PUBLIC_IP>:4173` for direct frontend access before the ALB is wired.
 - The Vite preview server must allow the ALB/browser `Host` header in STG; derive `preview.allowedHosts` from `STG_ALB_DNS`, `PUBLIC_API_BASE_URL`, the Vite fallback env var `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, and keep the current STG ALB hostname hard-coded until deployment proves the dynamic path is fully reliable.
 - App-host partial redeploys should avoid unnecessary Rust rebuilds: use the dedicated frontend deploy/run scripts for Svelte-only changes and the dedicated backend deploy/run scripts for Rust-only changes.

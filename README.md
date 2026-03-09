@@ -70,6 +70,7 @@ On the app host, the STG start scripts write PID files and logs into `logs/`:
 - backend log tail: `tail -f logs/backend.log`
 - frontend log tail: `tail -f logs/frontend.log`
 - the frontend must stay on port `4173` for the ALB target group; if Vite tries another port, stop the existing frontend process and restart it before relying on the ALB
+- the app-host start scripts now reclaim `4173` and `8080` automatically from stale same-user listeners before starting the new process
 
 ## Documentation
 
