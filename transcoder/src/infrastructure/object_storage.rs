@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use aws_credential_types::provider::SharedCredentialsProvider;
@@ -17,6 +18,9 @@ pub struct ObjectStorage {
     upload_bucket: String,
     processed_bucket: String,
 }
+
+const PROCESSED_ARTIFACT_UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
+const PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS: u32 = 3;
 
 impl ObjectStorage {
     pub async fn new(config: &TranscoderConfig) -> AppResult<Self> {
@@ -95,7 +99,17 @@ impl ObjectStorage {
         object_prefix: &str,
         local_directory: &Path,
     ) -> AppResult<()> {
-        for local_path in collect_files(local_directory)? {
+        let mut files = collect_files(local_directory)?;
+        files.sort_by_key(|path| upload_priority(path));
+        tracing::info!(
+            bucket = %self.processed_bucket,
+            object_prefix,
+            file_count = files.len(),
+            local_directory = %local_directory.display(),
+            "starting processed-artifact directory upload"
+        );
+
+        for local_path in files {
             let relative_path = local_path.strip_prefix(local_directory).map_err(|error| {
                 AppError::internal_with_context(
                     "failed to compute processing artifact relative path",
@@ -124,36 +138,116 @@ impl ObjectStorage {
         object_key: &str,
         local_path: &Path,
     ) -> AppResult<()> {
-        let body = ByteStream::from_path(local_path.to_path_buf())
+        let file_size_bytes = tokio::fs::metadata(local_path)
             .await
+            .map(|metadata| metadata.len())
             .map_err(|error| {
                 AppError::internal_with_context(
-                    "failed to open processing artifact for upload",
+                    "failed to stat processing artifact before upload",
                     format!("file={} error={error}", local_path.display()),
                 )
             })?;
 
-        self.client
-            .put_object()
-            .bucket(&self.processed_bucket)
-            .key(object_key)
-            .content_type(content_type_for_path(local_path))
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| {
-                AppError::internal_with_context(
-                    "failed to upload processing artifact",
-                    format!(
-                        "bucket={} key={} file={} error={error}",
+        let mut last_error = None;
+
+        for attempt in 1..=PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS {
+            tracing::info!(
+                attempt,
+                max_attempts = PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS,
+                bucket = %self.processed_bucket,
+                key = object_key,
+                file = %local_path.display(),
+                file_size_bytes,
+                "uploading processed artifact"
+            );
+
+            let body = ByteStream::from_path(local_path.to_path_buf())
+                .await
+                .map_err(|error| {
+                    AppError::internal_with_context(
+                        "failed to open processing artifact for upload",
+                        format!("file={} error={error}", local_path.display()),
+                    )
+                })?;
+
+            let upload = self
+                .client
+                .put_object()
+                .bucket(&self.processed_bucket)
+                .key(object_key)
+                .content_type(content_type_for_path(local_path))
+                .body(body)
+                .send();
+
+            match tokio::time::timeout(PROCESSED_ARTIFACT_UPLOAD_TIMEOUT, upload).await {
+                Ok(Ok(_)) => {
+                    tracing::info!(
+                        attempt,
+                        bucket = %self.processed_bucket,
+                        key = object_key,
+                        file = %local_path.display(),
+                        file_size_bytes,
+                        "uploaded processed artifact"
+                    );
+                    return Ok(());
+                }
+                Ok(Err(error)) => {
+                    let error_message = format!("{error:?}");
+                    last_error = Some(format!(
+                        "bucket={} key={} file={} attempt={} error={}",
                         self.processed_bucket,
                         object_key,
-                        local_path.display()
-                    ),
-                )
-            })?;
+                        local_path.display(),
+                        attempt,
+                        error_message
+                    ));
+                    if attempt < PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS {
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS,
+                            bucket = %self.processed_bucket,
+                            key = object_key,
+                            file = %local_path.display(),
+                            error = %error_message,
+                            "processed artifact upload failed; retrying"
+                        );
+                    }
+                }
+                Err(_) => {
+                    last_error = Some(format!(
+                        "bucket={} key={} file={} attempt={} error=timed out after {}s",
+                        self.processed_bucket,
+                        object_key,
+                        local_path.display(),
+                        attempt,
+                        PROCESSED_ARTIFACT_UPLOAD_TIMEOUT.as_secs()
+                    ));
+                    if attempt < PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS {
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS,
+                            bucket = %self.processed_bucket,
+                            key = object_key,
+                            file = %local_path.display(),
+                            timeout_seconds = PROCESSED_ARTIFACT_UPLOAD_TIMEOUT.as_secs(),
+                            "processed artifact upload timed out; retrying"
+                        );
+                    }
+                }
+            }
+        }
 
-        Ok(())
+        Err(AppError::internal_with_context(
+            "failed to upload processing artifact",
+            last_error.unwrap_or_else(|| {
+                format!(
+                    "bucket={} key={} file={} error=upload attempts exhausted without additional context",
+                    self.processed_bucket,
+                    object_key,
+                    local_path.display()
+                )
+            }),
+        ))
     }
 }
 
@@ -163,6 +257,16 @@ fn content_type_for_path(path: &Path) -> &'static str {
         Some("ts") => "video/mp2t",
         _ => "application/octet-stream",
     }
+}
+
+fn upload_priority(path: &Path) -> (u8, String) {
+    let priority = match path.extension().and_then(|value| value.to_str()) {
+        Some("ts") => 0,
+        Some("m3u8") => 1,
+        _ => 2,
+    };
+
+    (priority, path.to_string_lossy().into_owned())
 }
 
 fn collect_files(directory: &Path) -> AppResult<Vec<std::path::PathBuf>> {

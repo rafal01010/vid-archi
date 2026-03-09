@@ -33,6 +33,9 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "Refreshing transcoder Cargo dependencies"
+cargo fetch --manifest-path transcoder/Cargo.toml
+
 if [[ "${RUN_TESTS}" == "1" ]]; then
   echo "Running transcoder Rust tests"
   cargo test --manifest-path transcoder/Cargo.toml --offline

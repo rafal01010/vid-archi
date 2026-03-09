@@ -34,4 +34,4 @@ done
 docker compose \
   --env-file "${ENV_FILE}" \
   -f "${COMPOSE_FILE}" \
-  up -d "${SCALE_ARGS[@]}" "${SERVICES[@]}"
+  up -d --force-recreate --remove-orphans "${SCALE_ARGS[@]}" "${SERVICES[@]}"

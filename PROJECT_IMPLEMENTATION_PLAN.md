@@ -942,13 +942,16 @@ First-time deployment commands:
 
 Operational note:
 - On STG hosts, install Docker Engine plus Compose v2, then run `sudo systemctl enable --now docker` before invoking the host deploy scripts.
+- If Docker's `docker-compose-plugin` conflicts with Ubuntu's `docker-compose-v2` package on STG, remove `docker-compose-v2`, run `sudo apt --fix-broken install -y`, then install `docker-compose-plugin` and re-check `docker compose version`.
 - On the STG app host, backend/frontend are started as background processes rather than Docker containers; verify them with `ps -fp "$(cat logs/backend.pid)"`, `ps -fp "$(cat logs/frontend.pid)"`, and the `logs/*.log` files.
 - The app-host start scripts now reclaim ports `4173` and `8080` automatically from stale same-user listeners before starting the new frontend/backend process.
 - App-host deploy/start must fail fast if backend does not bind `8080` or frontend does not bind `4173`; print recent log output instead of reporting a false-success deploy.
-- App-host startup must truncate `logs/backend.log` and `logs/frontend.log` for each new attempt so operator troubleshooting uses current output instead of stale failed-run logs.
+- App-host startup should preserve prior logs while clearly marking each new attempt; append a timestamped start marker before launching backend/frontend.
+- Rust deploy scripts should refresh crate metadata explicitly with `cargo fetch` before build so fresh hosts do not fail on stale or missing registry index state.
 - Browser access uses `http://<STG_ALB_DNS>` when the ALB rules are ready, or `http://<APP_EC2_PUBLIC_IP>:4173` for direct frontend access before the ALB is wired.
 - The Vite preview server must allow the ALB/browser `Host` header in STG; derive `preview.allowedHosts` from `STG_ALB_DNS`, `PUBLIC_API_BASE_URL`, the Vite fallback env var `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, and keep the current STG ALB hostname hard-coded until deployment proves the dynamic path is fully reliable.
 - App-host partial redeploys should avoid unnecessary Rust rebuilds: use the dedicated frontend deploy/run scripts for Svelte-only changes and the dedicated backend deploy/run scripts for Rust-only changes.
+- Worker-host redeploys should replace previous containers deterministically; the chunker/transcoder start scripts now use Docker Compose `up -d --force-recreate --remove-orphans`.
 - The STG frontend preview server must stay pinned to port `4173`; do not allow automatic port fallback because the ALB target group remains configured for `4173`.
 
 Normal redeploy commands:
@@ -1071,6 +1074,9 @@ Implementation note for `9a`:
 - The API now accepts an optional `x-correlation-id` header, generates one when absent, and echoes it in the response.
 - `processing_jobs` and `transcoding_jobs` now persist `correlation_id`, allowing the upload request, chunker work, and transcoder work to be followed through one shared identifier.
 - `chunker` and `transcoder` now run claimed jobs inside spans that include `correlation_id` plus the relevant job/video fields.
+- The transcoder S3 publish path now logs each processed artifact upload with bucket, key, local file path, and file size so baseline stalls can be distinguished between ffmpeg packaging and processed-bucket publication.
+- The transcoder now uploads rendition segments before the variant playlist and retries/times out individual processed-bucket uploads so transient S3 publish failures do not immediately strand a baseline rendition in `PROCESSING_BASELINE` after ffmpeg has already finished.
+- STG worker Compose definitions now use `network_mode: host` for `chunker` and `transcoder-*` so S3/DB traffic uses the EC2 host network path directly instead of Docker bridge/NAT.
 - The runtime scripts now default `RUST_LOG` to `info`; set `RUST_LOG=debug` when deeper troubleshooting is needed.
 - The schema remains consolidated into the single bootstrap migration `backend/migrations/0001_initial_schema.up.sql` so first-time deployment still requires only one SQL file.
 

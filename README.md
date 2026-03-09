@@ -52,12 +52,14 @@ Every API request accepts an optional `x-correlation-id` header. If the client d
 
 The staging host scripts package binaries, build images where needed, and start the services with environment-driven configuration.
 The app-host start scripts now verify that backend/frontend really bind `8080`/`4173`; if startup fails, the deploy exits with recent log output instead of pretending success.
-Each new app-host start attempt truncates `logs/backend.log` and `logs/frontend.log` first, so the log files reflect the current run rather than stale output from an older failed deploy.
+Each new app-host start attempt appends a timestamped marker to `logs/backend.log` and `logs/frontend.log`, so old logs are preserved while the current run is still easy to find.
+The Rust deploy scripts now run `cargo fetch` before build so fresh STG hosts refresh crate metadata explicitly instead of failing on missing registry/index entries.
 
 For STG app-host redeploys:
 - use `./scripts/stg/deploy-stg-app-host.sh --env-file .env` when backend and frontend both changed
 - use `./frontend/scripts/deploy-frontend.sh --env-file .env` followed by `./frontend/scripts/run-stg-frontend.sh --env-file .env --background` when only frontend code changed
 - use `./backend/scripts/deploy-backend.sh` followed by `./backend/scripts/run-stg-api.sh --env-file .env --background` when only backend code changed
+- worker redeploys use Docker Compose container replacement; the chunker/transcoder start scripts now run with `--force-recreate --remove-orphans`
 
 ## STG Access
 

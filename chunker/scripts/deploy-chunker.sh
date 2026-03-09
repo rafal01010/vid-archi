@@ -33,6 +33,9 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "Refreshing chunker Cargo dependencies"
+cargo fetch --manifest-path chunker/Cargo.toml
+
 if [[ "${RUN_TESTS}" == "1" ]]; then
   echo "Running chunker Rust tests"
   cargo test --manifest-path chunker/Cargo.toml --offline

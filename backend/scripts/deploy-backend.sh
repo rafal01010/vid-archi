@@ -33,6 +33,9 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "Refreshing backend Cargo dependencies"
+cargo fetch --manifest-path backend/Cargo.toml
+
 if [[ "${RUN_TESTS}" == "1" ]]; then
   echo "Running Rust unit tests"
   cargo test --manifest-path backend/Cargo.toml

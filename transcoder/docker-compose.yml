@@ -2,6 +2,7 @@ services:
   transcoder-360p:
     image: ${TRANSCODER_IMAGE:-vid-archi-transcoder:stg}
     restart: unless-stopped
+    network_mode: host
     environment:
       APP_ENV: ${APP_ENV}
       AWS_REGION: ${AWS_REGION}
@@ -25,6 +26,7 @@ services:
   transcoder-480p:
     image: ${TRANSCODER_IMAGE:-vid-archi-transcoder:stg}
     restart: unless-stopped
+    network_mode: host
     environment:
       APP_ENV: ${APP_ENV}
       AWS_REGION: ${AWS_REGION}
@@ -48,6 +50,7 @@ services:
   transcoder-720p:
     image: ${TRANSCODER_IMAGE:-vid-archi-transcoder:stg}
     restart: unless-stopped
+    network_mode: host
     environment:
       APP_ENV: ${APP_ENV}
       AWS_REGION: ${AWS_REGION}
@@ -71,6 +74,7 @@ services:
   transcoder-1080p:
     image: ${TRANSCODER_IMAGE:-vid-archi-transcoder:stg}
     restart: unless-stopped
+    network_mode: host
     environment:
       APP_ENV: ${APP_ENV}
       AWS_REGION: ${AWS_REGION}
@@ -94,6 +98,7 @@ services:
   transcoder-1440p:
     image: ${TRANSCODER_IMAGE:-vid-archi-transcoder:stg}
     restart: unless-stopped
+    network_mode: host
     environment:
       APP_ENV: ${APP_ENV}
       AWS_REGION: ${AWS_REGION}
@@ -117,6 +122,7 @@ services:
   transcoder-2160p:
     image: ${TRANSCODER_IMAGE:-vid-archi-transcoder:stg}
     restart: unless-stopped
+    network_mode: host
     environment:
       APP_ENV: ${APP_ENV}
       AWS_REGION: ${AWS_REGION}
