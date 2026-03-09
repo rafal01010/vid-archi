@@ -118,6 +118,69 @@ impl VideoRepository {
         .map_err(AppError::from)
     }
 
+    pub async fn find_video_delete_context(
+        &self,
+        public_id: &str,
+    ) -> AppResult<Option<VideoDeleteContext>> {
+        sqlx::query_as::<_, VideoDeleteContext>(
+            r#"
+            SELECT
+                v.id,
+                v.public_id,
+                v.source_s3_key,
+                v.status::text AS status,
+                s.s3_upload_id AS active_upload_id
+            FROM videos v
+            LEFT JOIN upload_sessions s
+                ON s.video_id = v.id
+               AND s.status = 'OPEN'::upload_session_status
+            WHERE v.public_id = $1
+            "#,
+        )
+        .bind(public_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    pub async fn verify_delete_code(&self, video_id: Uuid, delete_code: &str) -> AppResult<bool> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM videos
+                WHERE id = $1
+                  AND delete_code_hash = encode(
+                      digest(delete_code_salt || ':' || $2, 'sha256'),
+                      'hex'
+                  )
+            )
+            "#,
+        )
+        .bind(video_id)
+        .bind(delete_code)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    pub async fn delete_video(&self, video_id: Uuid) -> AppResult<DeletedVideoRecord> {
+        sqlx::query_as::<_, DeletedVideoRecord>(
+            r#"
+            DELETE FROM videos
+            WHERE id = $1
+            RETURNING public_id
+            "#,
+        )
+        .bind(video_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::RowNotFound => AppError::not_found("video not found"),
+            other => AppError::from(other),
+        })
+    }
+
     pub async fn create_video_and_upload_session(
         &self,
         video: CreateVideoRecord,
@@ -127,9 +190,14 @@ impl VideoRepository {
 
         sqlx::query(
             r#"
+            WITH generated_delete_code AS (
+                SELECT encode(gen_random_bytes(16), 'hex') AS delete_code_salt
+            )
             INSERT INTO videos (
                 id,
                 public_id,
+                delete_code_salt,
+                delete_code_hash,
                 title,
                 original_filename,
                 content_type,
@@ -137,11 +205,26 @@ impl VideoRepository {
                 source_s3_key,
                 status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'INITIATED'::video_status)
+            SELECT
+                $1,
+                $2,
+                generated_delete_code.delete_code_salt,
+                encode(
+                    digest(generated_delete_code.delete_code_salt || ':' || $3, 'sha256'),
+                    'hex'
+                ),
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                'INITIATED'::video_status
+            FROM generated_delete_code
             "#,
         )
         .bind(video.id)
         .bind(video.public_id)
+        .bind(video.delete_code)
         .bind(video.title)
         .bind(video.original_filename)
         .bind(video.content_type)
@@ -369,6 +452,7 @@ fn map_insert_video_error(error: sqlx::Error) -> AppError {
 pub struct CreateVideoRecord {
     pub id: Uuid,
     pub public_id: String,
+    pub delete_code: String,
     pub title: Option<String>,
     pub original_filename: String,
     pub content_type: String,
@@ -431,6 +515,20 @@ pub struct VideoDetailRecord {
     pub manifest_s3_key: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+pub struct VideoDeleteContext {
+    pub id: Uuid,
+    pub public_id: String,
+    pub source_s3_key: String,
+    pub status: String,
+    pub active_upload_id: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+pub struct DeletedVideoRecord {
+    pub public_id: String,
 }
 
 #[derive(Debug, FromRow)]

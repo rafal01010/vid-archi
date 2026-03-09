@@ -8,18 +8,22 @@
 		MAX_UPLOAD_SIZE_BYTES
 	} from '$lib/policy';
 	import ShareLinkBox from '$lib/components/ShareLinkBox.svelte';
-	import { uploadMultipartVideo } from '$lib/uploads/multipartUpload';
+	import { isUploadCancelledError, uploadMultipartVideo } from '$lib/uploads/multipartUpload';
 
 	const dispatch = createEventDispatcher();
 
 	let selectedFile = null;
 	let title = '';
+	let deleteCode = '';
+	let deleteCodeConfirmation = '';
 	let uploadPhase = 'idle';
 	let uploadBytesTransferred = 0;
 	let uploadErrorMessage = '';
 	let sharePath = '';
+	let uploadController = null;
 
 	$: isUploading = ['preparing', 'uploading', 'completing'].includes(uploadPhase);
+	$: canCancelUpload = ['preparing', 'uploading'].includes(uploadPhase);
 	$: progressPercent = selectedFile
 		? Math.min(100, Math.round((uploadBytesTransferred / selectedFile.size) * 100))
 		: 0;
@@ -30,6 +34,8 @@
 			? 'Uploading...'
 		: uploadPhase === 'completing'
 			? 'Finalizing...'
+			: uploadPhase === 'cancelled'
+				? 'Start upload again'
 			: uploadPhase === 'failed'
 				? 'Retry upload'
 		: 'Upload video';
@@ -41,10 +47,16 @@
 			? 'Finishing upload'
 		: uploadPhase === 'succeeded'
 			? 'Upload complete'
+		: uploadPhase === 'cancelled'
+			? 'Upload cancelled'
 		: uploadPhase === 'failed'
 			? 'Upload failed'
 		: 'Not started';
-	$: canSubmit = Boolean(selectedFile) && !isUploading;
+	$: canSubmit =
+		Boolean(selectedFile) &&
+		Boolean(deleteCode.trim()) &&
+		Boolean(deleteCodeConfirmation.trim()) &&
+		!isUploading;
 
 	function handleFileSelected(event) {
 		const [file] = event.currentTarget.files ?? [];
@@ -62,28 +74,37 @@
 		}
 
 		const validationMessage = validateSelectedFile(selectedFile);
+		const deleteCodeValidationMessage = validateDeleteCode();
 
 		if (validationMessage) {
 			uploadErrorMessage = validationMessage;
 			return;
 		}
 
+		if (deleteCodeValidationMessage) {
+			uploadErrorMessage = deleteCodeValidationMessage;
+			return;
+		}
+
 		uploadErrorMessage = '';
 		sharePath = '';
 		uploadPhase = 'preparing';
+		uploadController = new AbortController();
 
 		try {
 			const createResponse = await createVideoUpload({
 				filename: selectedFile.name,
 				contentType: selectedFile.type || inferContentType(selectedFile.name),
 				sizeBytes: selectedFile.size,
-				title: title.trim() || null
-			});
+				title: title.trim() || null,
+				deleteCode: deleteCode.trim()
+			}, { signal: uploadController.signal });
 
 			uploadPhase = 'uploading';
 			const completeResponse = await uploadMultipartVideo({
 				file: selectedFile,
 				createResponse,
+				signal: uploadController.signal,
 				onProgress: (loadedBytes) => {
 					uploadBytesTransferred = loadedBytes;
 				},
@@ -101,9 +122,22 @@
 				playbackPath: completeResponse.playbackPath
 			});
 		} catch (error) {
+			if (isUploadCancelledError(error)) {
+				uploadPhase = 'cancelled';
+				uploadErrorMessage =
+					'Upload cancelled. Any incomplete multipart parts will expire through the S3 lifecycle rule.';
+				return;
+			}
+
 			uploadPhase = 'failed';
 			uploadErrorMessage = error instanceof Error ? error.message : 'Upload failed';
+		} finally {
+			uploadController = null;
 		}
+	}
+
+	function handleUploadCancelled() {
+		uploadController?.abort();
 	}
 
 	function validateSelectedFile(file) {
@@ -145,6 +179,21 @@
 		}
 
 		return 'video/mp4';
+	}
+
+	function validateDeleteCode() {
+		const normalizedDeleteCode = deleteCode.trim();
+		const normalizedDeleteCodeConfirmation = deleteCodeConfirmation.trim();
+
+		if (normalizedDeleteCode.length < 6) {
+			return 'Set a delete code with at least 6 characters.';
+		}
+
+		if (normalizedDeleteCode !== normalizedDeleteCodeConfirmation) {
+			return 'Delete code confirmation does not match.';
+		}
+
+		return '';
 	}
 </script>
 
@@ -192,10 +241,39 @@
 				</div>
 			</div>
 
+			<label class="field-label field-spacing" for="delete-code">Delete code</label>
+			<input
+				id="delete-code"
+				class="input"
+				type="password"
+				placeholder="Required to delete the video later"
+				bind:value={deleteCode}
+				disabled={isUploading}
+			/>
+
+			<label class="field-label field-spacing" for="delete-code-confirmation">Confirm delete code</label>
+			<input
+				id="delete-code-confirmation"
+				class="input"
+				type="password"
+				placeholder="Re-enter the delete code"
+				bind:value={deleteCodeConfirmation}
+				disabled={isUploading}
+			/>
+
+			<p class="delete-code-copy">
+				This code is stored as a hash and acts as the anonymous ownership check for deletion.
+			</p>
+
 			<div class="actions">
 				<button class="button-primary" type="button" on:click={handleUploadStarted} disabled={!canSubmit}>
 					{uploadButtonLabel}
 				</button>
+				{#if canCancelUpload}
+					<button class="button-secondary" type="button" on:click={handleUploadCancelled}>
+						Cancel upload
+					</button>
+				{/if}
 				{#if sharePath}
 					<a class="button-secondary" href={sharePath}>Open share page</a>
 				{/if}
@@ -288,6 +366,11 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 12px;
+	}
+
+	.delete-code-copy {
+		margin: 12px 0 22px;
+		color: var(--text-muted);
 	}
 
 	.status-card {

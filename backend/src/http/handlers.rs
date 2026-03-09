@@ -5,8 +5,9 @@ use uuid::Uuid;
 use crate::app::AppState;
 use crate::http::dto::{
     CompleteUploadRequest, CompleteUploadResponse, CreateVideoUploadRequest,
-    CreateVideoUploadResponse, HealthCheckResponse, ListRecentVideosResponse,
-    SignUploadPartsRequest, SignUploadPartsResponse, VideoDetailsResponse, VideoPlaybackResponse,
+    CreateVideoUploadResponse, DeleteVideoRequest, DeleteVideoResponse, HealthCheckResponse,
+    ListRecentVideosResponse, SignUploadPartsRequest, SignUploadPartsResponse,
+    VideoDetailsResponse, VideoPlaybackResponse,
 };
 use crate::http::error::AppResult;
 use crate::http::query::ListVideosQuery;
@@ -59,6 +60,19 @@ pub async fn get_video_playback(
     let response = state
         .video_query_service
         .get_video_playback(&public_id)
+        .await?;
+
+    Ok(Json(response.into()))
+}
+
+pub async fn delete_video(
+    State(state): State<AppState>,
+    Path(public_id): Path<String>,
+    Json(request): Json<DeleteVideoRequest>,
+) -> AppResult<Json<DeleteVideoResponse>> {
+    let response = state
+        .video_delete_service
+        .delete_video(&public_id, request.into())
         .await?;
 
     Ok(Json(response.into()))

@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::application::{
     CompleteUploadCommand, CompletedUploadPartInput, CreateVideoUploadCommand,
-    CreateVideoUploadResult, ListRecentVideosResult, SignUploadPartsCommand, SignUploadPartsResult,
-    VideoDetailsResult, VideoPlaybackResult,
+    CreateVideoUploadResult, DeleteVideoCommand, DeleteVideoResult, ListRecentVideosResult,
+    SignUploadPartsCommand, SignUploadPartsResult, VideoDetailsResult, VideoPlaybackResult,
 };
 
 #[derive(Debug, Deserialize)]
@@ -15,6 +15,7 @@ pub struct CreateVideoUploadRequest {
     pub content_type: String,
     pub size_bytes: i64,
     pub title: Option<String>,
+    pub delete_code: String,
 }
 
 impl From<CreateVideoUploadRequest> for CreateVideoUploadCommand {
@@ -24,6 +25,7 @@ impl From<CreateVideoUploadRequest> for CreateVideoUploadCommand {
             content_type: value.content_type,
             size_bytes: value.size_bytes,
             title: value.title,
+            delete_code: value.delete_code,
         }
     }
 }
@@ -150,6 +152,38 @@ pub struct CompleteUploadResponse {
     pub status: String,
     pub processing_job_id: Uuid,
     pub playback_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteVideoRequest {
+    pub delete_code: String,
+}
+
+impl From<DeleteVideoRequest> for DeleteVideoCommand {
+    fn from(value: DeleteVideoRequest) -> Self {
+        Self {
+            delete_code: value.delete_code,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteVideoResponse {
+    pub public_id: String,
+    pub deleted_upload_object_count: u64,
+    pub deleted_processed_object_count: u64,
+}
+
+impl From<DeleteVideoResult> for DeleteVideoResponse {
+    fn from(value: DeleteVideoResult) -> Self {
+        Self {
+            public_id: value.public_id,
+            deleted_upload_object_count: value.deleted_upload_object_count,
+            deleted_processed_object_count: value.deleted_processed_object_count,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

@@ -2,6 +2,11 @@
 
 VidArchi separates request handling from media processing so uploads stay lightweight while video packaging scales independently.
 
+Refer to:
+- [SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md](/Users/dave/LabBase/vid-archi/references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md)
+- [youtube_system_design_reference.md](/Users/dave/LabBase/vid-archi/references/youtube_system_design_reference.md)
+- [Youtube-problem-writeup.md](/Users/dave/LabBase/vid-archi/references/Youtube-problem-writeup.md)
+
 ## Component Diagram
 
 ```mermaid
@@ -63,12 +68,16 @@ sequenceDiagram
     T->>D: mark BASELINE_READY
     U->>A: GET /api/videos/{publicId}/playback
     A-->>U: manifestUrl + available qualities
+    U->>A: DELETE /api/videos/{publicId} + deleteCode
+    A->>S: delete videos/{video_id}/... from upload bucket
+    A->>P: delete videos/{video_id}/... from processed bucket
+    A->>D: delete video metadata row
 ```
 
 ## Runtime Responsibilities
 
 - `backend`
-  - owns upload session lifecycle, public video lookup, and playback metadata
+  - owns upload session lifecycle, delete-code hashing/verification, public video lookup, and playback metadata
   - never proxies video bytes
 - `chunker`
   - claims parent baseline jobs
@@ -86,6 +95,13 @@ sequenceDiagram
 - Chunkers scale on queued baseline jobs.
 - Transcoders scale by rendition, which allows heavier qualities such as `1080p` or `2160p` to receive more capacity without affecting baseline throughput.
 - `BASELINE_READY` is the first playback milestone. Higher renditions continue in the background under `PROCESSING_FULL`.
+
+## Anonymous Delete Flow
+
+- The upload form requires a delete code as an anonymous ownership substitute.
+- Postgres stores only a salted hash of that code; the plaintext never becomes long-lived application state.
+- `DELETE /api/videos/{publicId}` verifies the submitted code, deletes the upload-bucket prefix, deletes the processed-bucket prefix, and then removes the `videos` row so related metadata cascades.
+- The deterministic `videos/{video_id}/...` key layout keeps deletion bounded to a single prefix in each bucket instead of runtime object discovery by ad hoc naming.
 
 ## Structured Logging
 

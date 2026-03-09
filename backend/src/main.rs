@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use dotenvy::dotenv;
 
 use crate::app::{build_router, AppState};
-use crate::application::{UploadService, VideoQueryService};
+use crate::application::{UploadService, VideoDeleteService, VideoQueryService};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::AppConfig;
 use crate::infrastructure::object_storage::ObjectStorage;
@@ -31,11 +31,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config.clone(),
         policy.clone(),
         repository.clone(),
-        object_storage,
+        object_storage.clone(),
     );
+    let video_delete_service =
+        VideoDeleteService::new(config.clone(), repository.clone(), object_storage);
     let video_query_service = VideoQueryService::new(config.clone(), policy, repository);
 
-    let state = AppState::new(config.clone(), upload_service, video_query_service);
+    let state = AppState::new(
+        config.clone(),
+        upload_service,
+        video_delete_service,
+        video_query_service,
+    );
     let router = build_router(state);
     let address = SocketAddr::from(([0, 0, 0, 0], config.api_port));
 

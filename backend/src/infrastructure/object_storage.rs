@@ -5,7 +5,7 @@ use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ use crate::infrastructure::config::AppConfig;
 pub struct ObjectStorage {
     client: Client,
     upload_bucket: String,
+    processed_bucket: String,
     presign_ttl_seconds: u64,
 }
 
@@ -53,6 +54,7 @@ impl ObjectStorage {
         Ok(Self {
             client: Client::from_conf(s3_config_builder.build()),
             upload_bucket: config.upload_bucket.clone(),
+            processed_bucket: config.processed_bucket.clone(),
             presign_ttl_seconds: config.presign_ttl_seconds,
         })
     }
@@ -104,6 +106,17 @@ impl ObjectStorage {
             })?;
 
         Ok(())
+    }
+
+    pub async fn abort_multipart_upload_if_exists(&self, object_key: &str, upload_id: &str) {
+        if let Err(error) = self.abort_multipart_upload(object_key, upload_id).await {
+            tracing::warn!(
+                object_key,
+                upload_id,
+                error = %error,
+                "failed to abort multipart upload during delete cleanup"
+            );
+        }
     }
 
     pub async fn sign_upload_parts(
@@ -185,6 +198,109 @@ impl ObjectStorage {
             })?;
 
         Ok(())
+    }
+
+    pub async fn delete_video_assets_in_upload_bucket(&self, video_id: Uuid) -> AppResult<u64> {
+        self.delete_prefix(&self.upload_bucket, &format!("videos/{video_id}/"))
+            .await
+    }
+
+    pub async fn delete_video_assets_in_processed_bucket(&self, video_id: Uuid) -> AppResult<u64> {
+        self.delete_prefix(&self.processed_bucket, &format!("videos/{video_id}/"))
+            .await
+    }
+
+    async fn delete_prefix(&self, bucket: &str, prefix: &str) -> AppResult<u64> {
+        let mut deleted_object_count = 0u64;
+        let mut continuation_token = None;
+
+        loop {
+            let response = self
+                .client
+                .list_objects_v2()
+                .bucket(bucket)
+                .prefix(prefix)
+                .set_continuation_token(continuation_token.clone())
+                .send()
+                .await
+                .map_err(|error| {
+                    AppError::internal_with_context(
+                        "failed to list objects for video deletion",
+                        error.to_string(),
+                    )
+                })?;
+
+            let object_identifiers = response
+                .contents()
+                .iter()
+                .filter_map(|object| object.key())
+                .map(|key| {
+                    ObjectIdentifier::builder()
+                        .key(key)
+                        .build()
+                        .map_err(|error| {
+                            AppError::internal_with_context(
+                                "failed to build S3 object identifier for delete",
+                                error.to_string(),
+                            )
+                        })
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+
+            if !object_identifiers.is_empty() {
+                let delete_response = self
+                    .client
+                    .delete_objects()
+                    .bucket(bucket)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(object_identifiers.clone()))
+                            .build()
+                            .map_err(|error| {
+                                AppError::internal_with_context(
+                                    "failed to build S3 delete request",
+                                    error.to_string(),
+                                )
+                            })?,
+                    )
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        AppError::internal_with_context(
+                            "failed to delete video objects",
+                            error.to_string(),
+                        )
+                    })?;
+
+                if !delete_response.errors().is_empty() {
+                    let failed_keys = delete_response
+                        .errors()
+                        .iter()
+                        .filter_map(|error| error.key())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    return Err(AppError::internal_with_context(
+                        "failed to delete one or more video objects",
+                        failed_keys,
+                    ));
+                }
+
+                deleted_object_count += delete_response.deleted().len() as u64;
+            }
+
+            if !response.is_truncated().unwrap_or(false) {
+                break;
+            }
+
+            continuation_token = response.next_continuation_token().map(str::to_owned);
+
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(deleted_object_count)
     }
 }
 

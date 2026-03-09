@@ -2,6 +2,11 @@
 
 All API responses are JSON. Clients may send `x-correlation-id`; the API will echo it back and use it for downstream processing logs.
 
+Refer to:
+- [SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md](/Users/dave/LabBase/vid-archi/references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md)
+- [youtube_system_design_reference.md](/Users/dave/LabBase/vid-archi/references/youtube_system_design_reference.md)
+- [Youtube-problem-writeup.md](/Users/dave/LabBase/vid-archi/references/Youtube-problem-writeup.md)
+
 ## Health
 
 `GET /healthz`
@@ -25,7 +30,8 @@ Request:
   "title": "Quarterly update",
   "filename": "quarterly-update.mp4",
   "contentType": "video/mp4",
-  "sizeBytes": 734003200
+  "sizeBytes": 734003200,
+  "deleteCode": "remove-demo-2026"
 }
 ```
 
@@ -164,6 +170,28 @@ Response:
 }
 ```
 
+## Delete Video
+
+`DELETE /api/videos/{publicId}`
+
+Request:
+
+```json
+{
+  "deleteCode": "remove-demo-2026"
+}
+```
+
+Response:
+
+```json
+{
+  "publicId": "quarterly-update-r3t3x2k4r6w34fhx6yzbivskuq",
+  "deletedUploadObjectCount": 1,
+  "deletedProcessedObjectCount": 18
+}
+```
+
 ## Playback Metadata
 
 `GET /api/videos/{publicId}/playback`
@@ -213,3 +241,5 @@ Response:
 - `BASELINE_READY`, `PROCESSING_FULL`, and `READY` are playable states.
 - `FAILED` may still be playable if the baseline rendition was already published before a later rendition failed.
 - `errorCode` and `errorMessage` are safe to surface in the web application.
+- `DELETE /api/videos/{publicId}` returns `403` when the delete code does not match the stored hash.
+- `DELETE /api/videos/{publicId}` returns `409` while the video is in `PROCESSING_BASELINE` or `PROCESSING_FULL` so workers cannot recreate artifacts after a delete request.

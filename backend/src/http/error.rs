@@ -13,6 +13,8 @@ pub enum AppError {
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
     Internal(String),
@@ -33,6 +35,10 @@ impl AppError {
         Self::Conflict(message.into())
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -51,6 +57,7 @@ impl IntoResponse for AppError {
         let (status_code, code, message) = match self {
             AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, "bad_request", message),
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message),
+            AppError::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             AppError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
             AppError::Internal(message) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)

@@ -50,6 +50,10 @@
 		await loadRecentVideos(1);
 	}
 
+	async function handleVideoDeleted() {
+		await loadRecentVideos(1);
+	}
+
 	async function handlePreviousPageRequested() {
 		if (!pagination.hasPreviousPage) {
 			return;
@@ -77,6 +81,7 @@
 		{pagination}
 		on:previouspagerequested={handlePreviousPageRequested}
 		on:nextpagerequested={handleNextPageRequested}
+		on:videodeleted={handleVideoDeleted}
 	/>
 </div>
 

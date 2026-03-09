@@ -135,6 +135,8 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE IF NOT EXISTS videos (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   public_id TEXT NOT NULL UNIQUE,
+  delete_code_salt TEXT NOT NULL,
+  delete_code_hash TEXT NOT NULL,
   title TEXT,
   original_filename TEXT NOT NULL,
   content_type TEXT NOT NULL,

@@ -48,6 +48,7 @@ impl UploadService {
         let normalized_filename = sanitize_filename(&command.filename)?;
         let normalized_content_type = command.content_type.trim().to_ascii_lowercase();
         let normalized_title = normalize_optional_text(command.title);
+        let normalized_delete_code = normalize_delete_code(command.delete_code)?;
 
         self.policy.validate_upload(
             &normalized_filename,
@@ -85,6 +86,7 @@ impl UploadService {
         let video_record = CreateVideoRecord {
             id: video_id,
             public_id: public_id.clone(),
+            delete_code: normalized_delete_code,
             title: normalized_title.clone(),
             original_filename: normalized_filename.clone(),
             content_type: normalized_content_type.clone(),
@@ -241,11 +243,7 @@ impl UploadService {
 
         let finalized_upload = self
             .repository
-            .finalize_completed_upload(
-                video_id,
-                command.upload_session_id,
-                correlation_id.as_str(),
-            )
+            .finalize_completed_upload(video_id, command.upload_session_id, correlation_id.as_str())
             .await?;
 
         tracing::info!(
@@ -318,6 +316,7 @@ pub struct CreateVideoUploadCommand {
     pub content_type: String,
     pub size_bytes: i64,
     pub title: Option<String>,
+    pub delete_code: String,
 }
 
 #[derive(Debug)]
@@ -395,6 +394,24 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
             Some(trimmed.to_owned())
         }
     })
+}
+
+fn normalize_delete_code(delete_code: String) -> AppResult<String> {
+    let trimmed_delete_code = delete_code.trim();
+
+    if trimmed_delete_code.len() < 6 {
+        return Err(AppError::bad_request(
+            "delete code must be at least 6 characters long",
+        ));
+    }
+
+    if trimmed_delete_code.len() > 128 {
+        return Err(AppError::bad_request(
+            "delete code must be 128 characters or fewer",
+        ));
+    }
+
+    Ok(trimmed_delete_code.to_owned())
 }
 
 fn normalize_part_numbers(part_numbers: Vec<i32>) -> AppResult<Vec<i32>> {

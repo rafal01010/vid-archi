@@ -263,6 +263,8 @@ State transition rules:
 Fields:
 - `id` (UUID internal id)
 - `public_id` (short share slug, unique)
+- `delete_code_salt`
+- `delete_code_hash`
 - `title` (nullable)
 - `original_filename`
 - `content_type`
@@ -374,6 +376,7 @@ Request:
 - `contentType` (allow `video/mp4`, `video/quicktime`, `video/webm`, `video/x-msvideo`, `video/vnd.avi`)
 - `sizeBytes` (validate `<= 1GB`)
 - optional `title`
+- required `deleteCode` (plaintext accepted once, persisted only as a salted hash)
 
 Response:
 - `videoId`
@@ -455,6 +458,21 @@ Response:
 - `playbackPath` (frontend route)
 - `manifestUrl` (if streamable)
 
+### 9.6A Delete video
+
+`DELETE /api/videos/{publicId}`
+
+Request:
+- `deleteCode`
+
+Behavior:
+- Verify the salted delete-code hash in `videos`.
+- Abort any still-open multipart upload if one exists.
+- Reject deletes while status is `PROCESSING_BASELINE` or `PROCESSING_FULL` so in-flight workers cannot recreate artifacts after cleanup starts.
+- Delete `videos/{video_id}/...` objects from the upload bucket.
+- Delete `videos/{video_id}/...` HLS artifacts from the processed bucket.
+- Delete the `videos` row so related metadata rows cascade away.
+
 ### 9.7 Playback entrypoint (for player page)
 
 `GET /api/videos/{publicId}/playback`
@@ -494,7 +512,7 @@ API impact note for the expanded ladder:
 ### 10.1 Upload flow (anonymous + large-file-safe)
 
 1. Frontend requests create-upload session.
-2. Backend validates size/type and inserts `videos + upload_sessions`.
+2. Backend validates size/type, hashes the delete code, and inserts `videos + upload_sessions`.
 3. Backend creates multipart upload in S3 and returns signing data.
 4. Frontend uploads parts directly to S3.
 5. Frontend calls complete endpoint with ETags.
@@ -528,13 +546,16 @@ Pages:
 Homepage features:
 - file picker + drag/drop
 - client-side size/type pre-validation
+- delete-code + confirmation fields during upload
 - multipart progress bar
+- cancel-upload action while the current browser upload is still in progress
 - error/retry states
 - show generated share link on completion
 - show recent uploads sorted newest-first
 - show 10 videos per page by default
 - previous/next pagination controls for older uploads
 - every library entry links to `/v/[publicId]`
+- every library entry exposes delete-by-code as an anonymous ownership substitute
 - monochrome styling only (`black/white/gray`)
 
 Playback page features:
@@ -542,6 +563,10 @@ Playback page features:
 - status polling until streamable
 - video player using HLS manifest URL
 - fallback for unsupported browsers
+- delete action using the same delete code as the homepage flow
+
+Current browser limitation:
+- Full-page refresh does not resume an in-progress multipart upload because the active upload session, presigned part URLs, and completed-part ETags are kept in browser memory only.
 - clear state labels: `Uploading`, `Processing`, `Ready`, `Failed`
 
 UX rules aligned to exam:
@@ -667,6 +692,7 @@ Even without auth:
 - Limit presigned URL expiration (short TTL).
 - Scope presigned permissions to exact object key/session.
 - Rate limit session creation by IP.
+- Store only a salted hash of the upload-time delete code; never persist the plaintext delete secret.
 - Sanitize file names and never trust client metadata blindly.
 
 ## 16) Observability And Operations
@@ -945,11 +971,18 @@ Destructive DB reset commands:
 - [x] 4a. Build frontend upload page with file validation and progress UI.
 - [x] 4b. Wire frontend multipart part uploads directly to S3.
 - [x] 4c. On completion, display share URL (`/v/{publicId}`).
+- [x] 4d. Add anonymous delete flow with upload-time delete code and delete actions on the homepage/share page.
+- [x] 4e. Add client-side cancel-upload control for in-progress multipart uploads.
 
-Implementation note for `4a/4b/4c`:
+Implementation note for `4a/4b/4c/4d/4e`:
 - The homepage now combines both user flows: direct upload to shareable link, plus browsing recent uploads from newest to oldest before clicking into the share page.
 - The homepage feed now defaults to 10 videos per page and supports previous/next pagination.
+- The upload form now requires a delete code plus confirmation; the backend stores only a salted hash in `videos`.
+- The upload form now exposes a cancel action during the browser-side preparation and multipart-part transfer phases; cancelling stops client requests before final completion and relies on the S3 lifecycle rule to clean up any incomplete multipart parts left behind.
+- Browser refresh still does not resume an in-progress upload because multipart session state is not persisted across reloads.
+- The homepage library and `/v/{publicId}` share page now both expose delete-by-code, which removes the upload-bucket prefix, processed HLS prefix, and cascaded metadata rows.
 - Supporting backend read endpoints added: `GET /api/videos?page=1&pageSize=10` and `GET /api/videos/{publicId}`.
+- Supporting backend delete endpoint added: `DELETE /api/videos/{publicId}`.
 
 - [x] 5a. Build chunker/transcoder job pickup logic and status transition guardrails.
 - [x] 5b. Implement baseline transcoding pipeline (360p HLS segments + 360p variant playlist).
@@ -1040,16 +1073,17 @@ Schedule note:
 - [x] 11a. Write `docs/architecture.md` with component and sequence diagrams.
 - [x] 11b. Write `docs/api.md` and include request/response examples.
 - [x] 11c. Write `docs/operational-costs.md` with S3/CDN/lifecycle decisions and tradeoffs.
-- [ ] 11d. Add explicit citations to files under `references/` for requirement traceability.
+- [x] 11d. Add explicit citations to files under `references/` for requirement traceability.
 - [x] 11e. Document STG deployment topology, resource list, and monthly cost guardrails.
 - [x] 11f. Add ADR/note: API Gateway omitted in current STG for cost; include benefits and upgrade path to production-like ingress.
 
-Implementation note for `11a/11b/11c/11e/11f`:
-- `docs/architecture.md` now includes a component diagram, an upload-to-first-play sequence diagram, the structured logging model, the current STG topology, and the ingress note for the current ALB-only path.
-- `docs/api.md` now documents the implemented endpoints with concise request/response examples, including the `x-correlation-id` behavior.
+Implementation note for `11a/11b/11c/11d/11e/11f`:
+- `docs/architecture.md` now includes a component diagram, an upload-to-first-play sequence diagram, the delete-by-code cleanup path, the structured logging model, the current STG topology, and the ingress note for the current ALB-only path.
+- `docs/api.md` now documents the implemented endpoints with concise request/response examples, including the `x-correlation-id` behavior and the delete-video contract.
 - `docs/operational-costs.md` now captures the current STG footprint, cost-control decisions, and monthly guardrails.
+- `docs/stg-deployment.md` now consolidates the first-time STG deployment steps, ALB listener/target-group setup, environment templates, and redeploy commands for the current app-host plus worker-host layout.
 - Root and service READMEs were rewritten in a production-style tone so the repository reads like an operating application rather than an internal exercise bundle.
-- `11d` remains intentionally deferred in the published docs so the repository-facing documentation stays clean and production-oriented.
+- `docs/architecture.md` and `docs/api.md` now both include explicit "Refer to" links back to the requirement and system-design references under `references/`.
 
 - [ ] 12a. Run final end-to-end demo scenario and capture expected outputs.
 - [ ] 12b. Verify the requirement checklist in Section 3 item-by-item.

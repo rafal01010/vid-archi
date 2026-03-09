@@ -2,6 +2,8 @@
 
 VidArchi is a private video publishing service built around direct uploads, baseline-first HLS packaging, and a split processing pipeline that keeps the request path independent from media work.
 
+Uploads now require a delete code. The backend stores only a salted hash in Postgres, and the homepage or share page can later use that code to delete the source upload, processed HLS artifacts, and the public listing.
+
 ## Services
 
 ```text
@@ -16,6 +18,9 @@ config/       Shared upload and rendition policy
 ## Runtime Overview
 
 - Browsers upload directly to the source bucket with multipart presigned URLs.
+- The upload flow also persists a hashed delete code so anonymous users can remove videos later without full account ownership.
+- The browser upload flow now supports manual cancel while a multipart transfer is in progress.
+- Refreshing the page does not resume an in-progress upload because the active multipart session state is kept client-side only.
 - The API writes lifecycle state to Postgres and queues the baseline processing job.
 - `chunker` probes the source file and creates one baseline transcoding job plus any source-eligible higher renditions.
 - `transcoder` packages HLS output, publishes manifests and segments, and advances the video from `PROCESSING_BASELINE` to `BASELINE_READY`, then to `PROCESSING_FULL` and `READY`.
@@ -52,3 +57,4 @@ The staging host scripts package binaries, build images where needed, and start 
 - [architecture.md](/Users/dave/LabBase/vid-archi/docs/architecture.md)
 - [api.md](/Users/dave/LabBase/vid-archi/docs/api.md)
 - [operational-costs.md](/Users/dave/LabBase/vid-archi/docs/operational-costs.md)
+- [stg-deployment.md](/Users/dave/LabBase/vid-archi/docs/stg-deployment.md)

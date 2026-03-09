@@ -31,3 +31,4 @@ frontend/build
 frontend/.vite
 backups/
 logs/
+docs/stg-deployment.md

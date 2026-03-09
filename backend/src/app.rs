@@ -8,7 +8,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 
-use crate::application::{UploadService, VideoQueryService};
+use crate::application::{UploadService, VideoDeleteService, VideoQueryService};
 use crate::http::handlers;
 use crate::infrastructure::config::AppConfig;
 use crate::observability::{
@@ -20,6 +20,7 @@ use crate::observability::{
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub upload_service: UploadService,
+    pub video_delete_service: VideoDeleteService,
     pub video_query_service: VideoQueryService,
 }
 
@@ -27,11 +28,13 @@ impl AppState {
     pub fn new(
         config: AppConfig,
         upload_service: UploadService,
+        video_delete_service: VideoDeleteService,
         video_query_service: VideoQueryService,
     ) -> Self {
         Self {
             config: Arc::new(config),
             upload_service,
+            video_delete_service,
             video_query_service,
         }
     }
@@ -46,7 +49,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/videos/{public_id}",
-            axum::routing::get(handlers::get_video_details),
+            axum::routing::get(handlers::get_video_details).delete(handlers::delete_video),
         )
         .route(
             "/api/videos/{public_id}/playback",

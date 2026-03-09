@@ -1,7 +1,9 @@
 <script>
+	import { goto } from '$app/navigation';
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getVideoPlayback } from '$lib/api';
+	import DeleteVideoPanel from '$lib/components/DeleteVideoPanel.svelte';
 	import { formatDateTime } from '$lib/formatters';
 	import ShareLinkBox from '$lib/components/ShareLinkBox.svelte';
 	import StatusBadge from '$lib/components/StatusBadge.svelte';
@@ -93,6 +95,11 @@
 
 		return 'This video is still being prepared. Check back again in a little while.';
 	}
+
+	async function handleVideoDeleted() {
+		clearRefreshTimer();
+		await goto('/');
+	}
 </script>
 
 <div class="page-shell">
@@ -137,6 +144,8 @@
 			{/if}
 
 			<ShareLinkBox sharePath={playback.playbackPath} />
+
+			<DeleteVideoPanel publicId={playback.publicId} on:deleted={handleVideoDeleted} />
 
 			{#if isVideoStreamable(playback.status, playback.isStreamable) && playback.manifestUrl}
 				<div class="player-card">

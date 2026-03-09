@@ -42,10 +42,7 @@ pub fn init_tracing(service_name: &'static str) {
     tracing::info!(service = service_name, "tracing initialized");
 }
 
-pub async fn correlation_id_middleware(
-    mut request: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn correlation_id_middleware(mut request: Request<Body>, next: Next) -> Response {
     let correlation_id = request
         .headers()
         .get(CORRELATION_ID_HEADER)
@@ -76,11 +73,7 @@ pub fn log_request_start<B>(request: &Request<B>, _span: &Span) {
     );
 }
 
-pub fn log_request_finish<B>(
-    response: &axum::http::Response<B>,
-    latency: Duration,
-    _span: &Span,
-) {
+pub fn log_request_finish<B>(response: &axum::http::Response<B>, latency: Duration, _span: &Span) {
     tracing::info!(
         status = response.status().as_u16(),
         elapsed_ms = latency.as_millis() as u64,

@@ -2,10 +2,12 @@
 
 This directory contains the Rust API service responsible for:
 - creating video records and upload sessions
+- hashing and verifying upload-time delete codes
 - issuing presigned multipart upload instructions
 - generating deterministic public share links
 - listing recent videos for the homepage
 - resolving public share IDs for the share page
+- deleting source and processed assets by public link + delete code
 - inserting the parent baseline processing job after upload completion
 
 ## Layout
@@ -25,6 +27,7 @@ scripts/           deploy/run helpers
 - `POST /api/videos`
 - `GET /api/videos`
 - `GET /api/videos/{publicId}`
+- `DELETE /api/videos/{publicId}`
 - `GET /api/videos/{publicId}/playback`
 - `POST /api/videos/{videoId}/parts/sign`
 - `POST /api/videos/{videoId}/complete`
@@ -34,6 +37,7 @@ scripts/           deploy/run helpers
 
 `POST /api/videos`:
 - validates `filename`, `contentType`, and `sizeBytes`
+- requires `deleteCode` and stores only a salted hash in Postgres
 - generates a deterministic `public_id`
 - initializes the multipart upload in object storage using `videos/{video_id}/source/original`
 
@@ -64,6 +68,13 @@ scripts/           deploy/run helpers
 - exposes `availableQualities[].playlistUrl` for fixed-quality playback
 - reads ready rendition rows from `video_renditions` and orders them by the shared video policy ladder
 - returns `pollIntervalMs` so the share page can refresh while higher qualities are still processing
+
+`DELETE /api/videos/{publicId}`:
+- requires the `deleteCode` that was set during upload
+- verifies the salted hash in Postgres
+- deletes the source object prefix from the upload bucket
+- deletes the processed HLS prefix from the processed bucket
+- removes the `videos` row, which cascades related metadata rows
 
 ## Processing Contract
 

@@ -31,12 +31,18 @@ Avoid inventing alternate UI-only status names when the backend already has a pr
 - The upload form performs:
   - file size validation against the current 1GB service limit
   - file type validation for MP4, MOV, WebM, and AVI
+  - delete-code capture and confirmation before upload starts
   - direct multipart uploads from the browser to S3/MinIO using presigned `PUT` URLs
   - progress reporting during part uploads
+  - cancel-upload while the current browser session is still transferring parts
   - share-link display after upload completion
+- Upload cancellation is client-side only. If the user stops mid-transfer, any leftover multipart parts are cleaned up later by the upload bucket lifecycle rule.
+- Full-page refresh does not resume the current multipart upload. The active upload session, signed part URLs, and completed-part ETags are held in browser memory only.
 - The homepage library calls `GET /api/videos` and renders videos newest first.
+- The homepage library also exposes a delete form per video card so anonymous uploads can be removed from the front page with the stored delete code.
 - Clicking a library card opens `/v/[publicId]`, which calls `GET /api/videos/{publicId}/playback`.
 - The playback page polls while the video is still processing so new renditions can appear without a reload.
+- The share page includes the same delete flow as a fallback entrypoint when the uploader opens the public link directly.
 - The playback page uses:
   - `manifestUrl` for `Auto` adaptive bitrate playback
   - `availableQualities[].playlistUrl` for fixed-quality playback such as `360p` or `1080p`

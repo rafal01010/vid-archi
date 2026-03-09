@@ -1,5 +1,6 @@
 <script>
 	import { createEventDispatcher } from 'svelte';
+	import DeleteVideoPanel from '$lib/components/DeleteVideoPanel.svelte';
 	import { formatDateTime } from '$lib/formatters';
 	import StatusBadge from '$lib/components/StatusBadge.svelte';
 	import { describeVideoStatus } from '$lib/status';
@@ -25,6 +26,10 @@
 	function handleNextPageClicked() {
 		dispatch('nextpagerequested');
 	}
+
+	function handleVideoDeleted() {
+		dispatch('videodeleted');
+	}
 </script>
 
 <section class="panel library-panel">
@@ -47,17 +52,24 @@
 	{:else}
 		<div class="video-grid">
 			{#each videos as video}
-				<a class="video-card" href={video.playbackPath}>
-					<div class="video-card-top">
-						<StatusBadge status={video.status} />
-						<span class="meta-text">{formatDateTime(video.createdAt)}</span>
+				<article class="video-card">
+					<div class="video-card-content">
+						<div class="video-card-top">
+							<StatusBadge status={video.status} />
+							<span class="meta-text">{formatDateTime(video.createdAt)}</span>
+						</div>
+						<h3>{video.title || video.originalFilename}</h3>
+						<p>{describeVideoStatus(video.status)}</p>
+						<div class="video-card-footer">
+							<a class="inline-link" href={video.playbackPath}>Open video</a>
+						</div>
 					</div>
-					<h3>{video.title || video.originalFilename}</h3>
-					<p>{describeVideoStatus(video.status)}</p>
-					<div class="video-card-footer">
-						<span>Open video</span>
-					</div>
-				</a>
+					<DeleteVideoPanel
+						publicId={video.publicId}
+						variant="card"
+						on:deleted={handleVideoDeleted}
+					/>
+				</article>
 			{/each}
 		</div>
 
@@ -128,6 +140,11 @@
 		box-shadow: 0 16px 32px rgba(0, 0, 0, 0.12);
 	}
 
+	.video-card-content {
+		display: grid;
+		gap: 12px;
+	}
+
 	.video-card-top,
 	.video-card-footer {
 		display: flex;
@@ -150,6 +167,11 @@
 		font-size: 0.8rem;
 		color: var(--text-muted);
 		word-break: break-all;
+	}
+
+	.inline-link {
+		color: var(--accent);
+		font-weight: 700;
 	}
 
 	.pagination-row {

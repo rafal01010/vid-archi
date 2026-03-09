@@ -42,22 +42,33 @@ export function getVideoPlayback(publicId) {
 	return sendJsonRequest(`/api/videos/${encodeURIComponent(publicId)}/playback`);
 }
 
-export function createVideoUpload(payload) {
+export function createVideoUpload(payload, options = {}) {
 	return sendJsonRequest('/api/videos', {
+		...options,
 		method: 'POST',
 		body: JSON.stringify(payload)
 	});
 }
 
-export function signUploadParts(videoId, payload) {
+export function deleteVideo(publicId, payload, options = {}) {
+	return sendJsonRequest(`/api/videos/${encodeURIComponent(publicId)}`, {
+		...options,
+		method: 'DELETE',
+		body: JSON.stringify(payload)
+	});
+}
+
+export function signUploadParts(videoId, payload, options = {}) {
 	return sendJsonRequest(`/api/videos/${videoId}/parts/sign`, {
+		...options,
 		method: 'POST',
 		body: JSON.stringify(payload)
 	});
 }
 
-export function completeVideoUpload(videoId, payload) {
+export function completeVideoUpload(videoId, payload, options = {}) {
 	return sendJsonRequest(`/api/videos/${videoId}/complete`, {
+		...options,
 		method: 'POST',
 		body: JSON.stringify(payload)
 	});
