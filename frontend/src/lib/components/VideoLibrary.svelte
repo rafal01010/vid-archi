@@ -53,15 +53,15 @@
 				{#each videos as video}
 					<article class="video-row">
 						<a class="video-row-link" href={video.playbackPath}>
-							<div class="video-row-action">
-								<span class="card-open-button">Open</span>
-							</div>
 							<div class="video-row-copy">
 								<div class="video-row-top">
 									<h3>{video.title || video.originalFilename}</h3>
 									<span class="video-status">{describeVideoStatus(video.status)}</span>
 								</div>
 								<p class="video-row-meta">Uploaded {formatDate(video.createdAt)}</p>
+								<div class="video-row-action">
+									<span class="card-open-button">Open</span>
+								</div>
 							</div>
 						</a>
 						<DeleteVideoPanel
@@ -143,9 +143,9 @@
 
 	.video-row-link {
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr);
 		align-items: center;
-		gap: 14px;
+		gap: 10px;
 		padding: 14px 16px;
 		min-width: 0;
 	}
@@ -157,8 +157,13 @@
 
 	.video-row-copy {
 		display: grid;
-		gap: 4px;
+		gap: 6px;
 		min-width: 0;
+	}
+
+	.video-row-action {
+		display: flex;
+		justify-content: flex-start;
 	}
 
 	.video-row-top {
@@ -237,7 +242,6 @@
 		}
 
 		.video-row-link {
-			grid-template-columns: auto 1fr;
 			gap: 12px;
 		}
 	}
