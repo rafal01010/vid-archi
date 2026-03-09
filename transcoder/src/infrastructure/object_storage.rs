@@ -8,6 +8,7 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::config::TranscoderConfig;
@@ -15,8 +16,10 @@ use crate::infrastructure::config::TranscoderConfig;
 #[derive(Clone)]
 pub struct ObjectStorage {
     client: Client,
+    aws_region: String,
     upload_bucket: String,
     processed_bucket: String,
+    enable_aws_cli_s3_fallback: bool,
 }
 
 const PROCESSED_ARTIFACT_UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -55,8 +58,10 @@ impl ObjectStorage {
 
         Ok(Self {
             client: Client::from_conf(s3_config_builder.build()),
+            aws_region: config.aws_region.clone(),
             upload_bucket: config.upload_bucket.clone(),
             processed_bucket: config.processed_bucket.clone(),
+            enable_aws_cli_s3_fallback: config.enable_aws_cli_s3_fallback,
         })
     }
 
@@ -147,6 +152,12 @@ impl ObjectStorage {
                     format!("file={} error={error}", local_path.display()),
                 )
             })?;
+        let file_bytes = tokio::fs::read(local_path).await.map_err(|error| {
+            AppError::internal_with_context(
+                "failed to read processing artifact before upload",
+                format!("file={} error={error}", local_path.display()),
+            )
+        })?;
 
         let mut last_error = None;
 
@@ -161,14 +172,7 @@ impl ObjectStorage {
                 "uploading processed artifact"
             );
 
-            let body = ByteStream::from_path(local_path.to_path_buf())
-                .await
-                .map_err(|error| {
-                    AppError::internal_with_context(
-                        "failed to open processing artifact for upload",
-                        format!("file={} error={error}", local_path.display()),
-                    )
-                })?;
+            let body = ByteStream::from(file_bytes.clone());
 
             let upload = self
                 .client
@@ -176,6 +180,7 @@ impl ObjectStorage {
                 .bucket(&self.processed_bucket)
                 .key(object_key)
                 .content_type(content_type_for_path(local_path))
+                .content_length(file_size_bytes as i64)
                 .body(body)
                 .send();
 
@@ -193,6 +198,18 @@ impl ObjectStorage {
                 }
                 Ok(Err(error)) => {
                     let error_message = format!("{error:?}");
+                    if self
+                        .try_upload_processing_file_with_aws_cli(
+                            object_key,
+                            local_path,
+                            file_size_bytes,
+                            attempt,
+                            Some(error_message.as_str()),
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
                     last_error = Some(format!(
                         "bucket={} key={} file={} attempt={} error={}",
                         self.processed_bucket,
@@ -214,6 +231,18 @@ impl ObjectStorage {
                     }
                 }
                 Err(_) => {
+                    if self
+                        .try_upload_processing_file_with_aws_cli(
+                            object_key,
+                            local_path,
+                            file_size_bytes,
+                            attempt,
+                            None,
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
                     last_error = Some(format!(
                         "bucket={} key={} file={} attempt={} error=timed out after {}s",
                         self.processed_bucket,
@@ -248,6 +277,97 @@ impl ObjectStorage {
                 )
             }),
         ))
+    }
+}
+
+impl ObjectStorage {
+    async fn try_upload_processing_file_with_aws_cli(
+        &self,
+        object_key: &str,
+        local_path: &Path,
+        file_size_bytes: u64,
+        attempt: u32,
+        sdk_error: Option<&str>,
+    ) -> AppResult<bool> {
+        if !self.enable_aws_cli_s3_fallback {
+            return Ok(false);
+        }
+
+        let s3_uri = format!("s3://{}/{}", self.processed_bucket, object_key);
+        let mut command = Command::new("aws");
+        command.args([
+            "s3",
+            "cp",
+            local_path.to_string_lossy().as_ref(),
+            s3_uri.as_str(),
+            "--region",
+            self.aws_region.as_str(),
+            "--no-progress",
+            "--only-show-errors",
+            "--content-type",
+            content_type_for_path(local_path),
+        ]);
+
+        tracing::warn!(
+            attempt,
+            bucket = %self.processed_bucket,
+            key = object_key,
+            file = %local_path.display(),
+            file_size_bytes,
+            sdk_error = sdk_error.unwrap_or("timed out"),
+            "falling back to aws cli for processed artifact upload"
+        );
+
+        let output = tokio::time::timeout(PROCESSED_ARTIFACT_UPLOAD_TIMEOUT, command.output())
+            .await
+            .map_err(|_| {
+                AppError::internal_with_context(
+                    "aws cli upload fallback timed out",
+                    format!(
+                        "bucket={} key={} file={} timeout_seconds={}",
+                        self.processed_bucket,
+                        object_key,
+                        local_path.display(),
+                        PROCESSED_ARTIFACT_UPLOAD_TIMEOUT.as_secs()
+                    ),
+                )
+            })?
+            .map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to spawn aws cli upload fallback",
+                    format!(
+                        "bucket={} key={} file={} error={error}",
+                        self.processed_bucket,
+                        object_key,
+                        local_path.display()
+                    ),
+                )
+            })?;
+
+        if output.status.success() {
+            tracing::info!(
+                attempt,
+                bucket = %self.processed_bucket,
+                key = object_key,
+                file = %local_path.display(),
+                file_size_bytes,
+                "uploaded processed artifact with aws cli fallback"
+            );
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            attempt,
+            bucket = %self.processed_bucket,
+            key = object_key,
+            file = %local_path.display(),
+            file_size_bytes,
+            error = %stderr.trim(),
+            "aws cli upload fallback failed"
+        );
+
+        Ok(false)
     }
 }
 
