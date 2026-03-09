@@ -1,12 +1,13 @@
 <script>
-	import { statusTone } from '$lib/status';
+	import { describeVideoStatus, statusTone } from '$lib/status';
 
 	export let status = 'INITIATED';
 
 	$: tone = statusTone(status);
+	$: label = describeVideoStatus(status);
 </script>
 
-<span class={`badge badge-${tone}`}>{status}</span>
+<span class={`badge badge-${tone}`}>{label}</span>
 
 <style>
 	.badge {

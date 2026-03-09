@@ -45,19 +45,12 @@
 </script>
 
 <section class={panelClassName}>
-	<div class="delete-copy">
-		<p class="detail-label">Delete video</p>
-		<p class="detail-value">
-			Deleting removes the upload source, processed HLS files, and the public page.
-		</p>
-	</div>
-
 	{#if deletePhase === 'deleted'}
 		<div class="message message-success">Video deleted.</div>
 	{:else}
 		<div class="delete-actions">
 			<button class="button-secondary delete-toggle" type="button" on:click={handleDeleteToggle}>
-				{isFormVisible ? 'Cancel' : 'Delete with code'}
+				{isFormVisible ? 'Cancel' : 'Delete video'}
 			</button>
 		</div>
 
@@ -68,11 +61,10 @@
 					id={`delete-code-${publicId}`}
 					class="input"
 					type="password"
-					placeholder="Enter the code from upload"
+					placeholder="Enter delete code"
 					bind:value={deleteCode}
 					disabled={isDeleting}
 				/>
-				<p class="delete-note">This action cannot be undone.</p>
 				<div class="delete-actions">
 					<button class="button-danger" type="button" on:click={handleDeleteSubmitted} disabled={isDeleting}>
 						{deleteButtonLabel}
@@ -102,11 +94,6 @@
 		border-radius: 18px;
 	}
 
-	.delete-copy {
-		display: grid;
-		gap: 6px;
-	}
-
 	.delete-actions {
 		display: flex;
 		flex-wrap: wrap;
@@ -116,12 +103,6 @@
 	.delete-form {
 		display: grid;
 		gap: 10px;
-	}
-
-	.delete-note {
-		margin: 0;
-		font-size: 0.9rem;
-		color: var(--text-muted);
 	}
 
 	.button-danger {

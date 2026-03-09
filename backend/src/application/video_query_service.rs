@@ -132,6 +132,8 @@ pub struct VideoDetailsResult {
     pub is_streamable: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub baseline_ready_at: Option<DateTime<Utc>>,
+    pub processing_completed_at: Option<DateTime<Utc>>,
     pub playback_path: String,
     pub manifest_url: Option<String>,
     pub error_code: Option<String>,
@@ -147,6 +149,8 @@ pub struct VideoPlaybackResult {
     pub is_streamable: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub baseline_ready_at: Option<DateTime<Utc>>,
+    pub processing_completed_at: Option<DateTime<Utc>>,
     pub playback_path: String,
     pub manifest_url: Option<String>,
     pub error_code: Option<String>,
@@ -212,6 +216,8 @@ fn map_video_details(config: &AppConfig, video: VideoDetailRecord) -> VideoDetai
         is_streamable: video.is_streamable,
         created_at: video.created_at,
         updated_at: video.updated_at,
+        baseline_ready_at: video.baseline_ready_at,
+        processing_completed_at: video.processing_completed_at,
         playback_path: format!("/v/{}", video.public_id),
         manifest_url: video
             .manifest_s3_key
@@ -259,6 +265,8 @@ fn map_video_playback(
         is_streamable: video.is_streamable,
         created_at: video.created_at,
         updated_at: video.updated_at,
+        baseline_ready_at: video.baseline_ready_at,
+        processing_completed_at: video.processing_completed_at,
         playback_path: format!("/v/{}", video.public_id),
         manifest_url: video
             .manifest_s3_key
@@ -391,6 +399,8 @@ mod tests {
                 is_streamable: true,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                baseline_ready_at: Some(Utc::now()),
+                processing_completed_at: Some(Utc::now()),
                 manifest_s3_key: Some("videos/demo/hls/master.m3u8".to_owned()),
                 error_code: None,
                 error_message: None,

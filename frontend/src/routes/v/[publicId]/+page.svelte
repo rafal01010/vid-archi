@@ -6,7 +6,6 @@
 	import DeleteVideoPanel from '$lib/components/DeleteVideoPanel.svelte';
 	import { formatDateTime } from '$lib/formatters';
 	import ShareLinkBox from '$lib/components/ShareLinkBox.svelte';
-	import StatusBadge from '$lib/components/StatusBadge.svelte';
 	import VideoPlayer from '$lib/components/VideoPlayer.svelte';
 	import { describeVideoStatus, isVideoStreamable } from '$lib/status';
 
@@ -78,7 +77,7 @@
 		}
 
 		if (currentPlayback.status === 'FAILED' && currentPlayback.isStreamable) {
-			return 'Playback is available, but processing did not finish cleanly.';
+			return 'Ready to watch';
 		}
 
 		return describeVideoStatus(currentPlayback.status);
@@ -93,7 +92,83 @@
 			return currentPlayback.errorMessage || 'This video is unavailable right now.';
 		}
 
+		if (currentPlayback.status === 'BASELINE_READY' || currentPlayback.status === 'PROCESSING_FULL') {
+			return 'You can watch now while higher quality versions continue to finish in the background.';
+		}
+
 		return 'This video is still being prepared. Check back again in a little while.';
+	}
+
+	function processingSummary(currentPlayback) {
+		if (!currentPlayback) {
+			return '';
+		}
+
+		if (currentPlayback.status === 'FAILED' && currentPlayback.isStreamable) {
+			return 'Ready to watch';
+		}
+
+		if (currentPlayback.status === 'FAILED') {
+			return 'Unavailable right now';
+		}
+
+		return statusCopy(currentPlayback);
+	}
+
+	function processingDetails(currentPlayback) {
+		if (!currentPlayback) {
+			return '';
+		}
+
+		if (currentPlayback.status === 'PROCESSING_FULL' || currentPlayback.status === 'BASELINE_READY') {
+			return 'More quality options are still being prepared.';
+		}
+
+		if (currentPlayback.status === 'READY') {
+			return 'All available playback qualities are ready.';
+		}
+
+		if (currentPlayback.status === 'FAILED' && currentPlayback.isStreamable) {
+			return 'Playback is available, but some later processing steps did not finish cleanly.';
+		}
+
+		if (currentPlayback.status === 'FAILED') {
+			return currentPlayback.errorMessage || 'This video is unavailable right now.';
+		}
+
+		return 'Your video is being prepared for playback.';
+	}
+
+	function buildTimelineItems(currentPlayback) {
+		if (!currentPlayback) {
+			return [];
+		}
+
+		const items = [
+			{
+				label: 'Uploaded',
+				value: formatDateTime(currentPlayback.createdAt)
+			}
+		];
+
+		if (currentPlayback.baselineReadyAt) {
+			items.push({
+				label: 'Ready to watch',
+				value: formatDateTime(currentPlayback.baselineReadyAt)
+			});
+		}
+
+		if (
+			currentPlayback.processingCompletedAt &&
+			currentPlayback.processingCompletedAt !== currentPlayback.baselineReadyAt
+		) {
+			items.push({
+				label: 'All qualities finished',
+				value: formatDateTime(currentPlayback.processingCompletedAt)
+			});
+		}
+
+		return items;
 	}
 
 	async function handleVideoDeleted() {
@@ -104,53 +179,19 @@
 
 <div class="page-shell">
 	<section class="panel playback-shell">
-		<a class="back-link" href="/">Back to homepage</a>
-
 		{#if pageState === 'loading'}
 			<div class="empty-state">Loading video.</div>
 		{:else if pageState === 'error'}
 			<div class="empty-state">{errorMessage}</div>
 		{:else if playback}
-			<div class="playback-header">
-				<div>
-					<p class="eyebrow">Video</p>
-					<h1 class="section-title">{playback.title || playback.originalFilename}</h1>
-					<p class="section-copy">{statusCopy(playback)}</p>
-				</div>
-				<StatusBadge status={playback.status} />
-			</div>
-
-			<div class="details-grid">
-				<div class="details-card">
-					<p class="detail-label">Uploaded</p>
-					<p class="detail-value">{formatDateTime(playback.createdAt)}</p>
-				</div>
-				<div class="details-card">
-					<p class="detail-label">Processing State</p>
-					<p class="detail-value">{playback.status}</p>
-				</div>
-			</div>
-
-			{#if playback.errorMessage}
-				<div class="failure-card">
-					<p class="detail-label">Processing note</p>
-					<p class="detail-value">{playback.errorMessage}</p>
-					{#if playback.isStreamable && playback.manifestUrl}
-						<p class="failure-copy">
-							The baseline stream is still available, but later processing did not finish cleanly.
-						</p>
-					{/if}
-				</div>
-			{/if}
-
-			<ShareLinkBox sharePath={playback.playbackPath} />
-
-			<DeleteVideoPanel publicId={playback.publicId} on:deleted={handleVideoDeleted} />
+			<header class="playback-header">
+				<a class="back-link" href="/">Back to homepage</a>
+				<h1 class="playback-title">{playback.title || playback.originalFilename}</h1>
+			</header>
 
 			{#if isVideoStreamable(playback.status, playback.isStreamable) && playback.manifestUrl}
 				<div class="player-card">
 					<VideoPlayer
-						title={playback.title || playback.originalFilename}
 						manifestUrl={playback.manifestUrl}
 						qualityOptions={playback.availableQualities}
 						defaultQuality={playback.defaultQuality}
@@ -158,20 +199,42 @@
 				</div>
 			{:else}
 				<div class="player-placeholder">
-					<p class="detail-label">Availability</p>
-					<p class="detail-value">{availabilityMessage(playback)}</p>
+					<p class="placeholder-copy">{availabilityMessage(playback)}</p>
 				</div>
 			{/if}
 
-			{#if playback.status !== 'READY' && playback.status !== 'FAILED'}
-				<div class="polling-note">
-					<p class="detail-label">Live refresh</p>
-					<p class="detail-value">
-						This page refreshes playback metadata every
-						{Math.round((playback.pollIntervalMs ?? 5000) / 1000)} seconds so the player picks up
-						new renditions as processing continues.
-					</p>
+			<div class="details-grid">
+				<div class="details-card">
+					<p class="detail-label">Status</p>
+					<p class="detail-value">{processingSummary(playback)}</p>
+					<p class="detail-copy">{processingDetails(playback)}</p>
 				</div>
+
+				{#each buildTimelineItems(playback) as item}
+					<div class="details-card">
+						<p class="detail-label">{item.label}</p>
+						<p class="detail-value">{item.value}</p>
+					</div>
+				{/each}
+			</div>
+
+			{#if playback.errorMessage && playback.status === 'FAILED'}
+				<div class="failure-card">
+					<p class="detail-label">Playback note</p>
+					<p class="detail-value">{playback.errorMessage}</p>
+				</div>
+			{/if}
+
+			<div class="bottom-grid">
+				<ShareLinkBox sharePath={playback.playbackPath} />
+				<DeleteVideoPanel publicId={playback.publicId} on:deleted={handleVideoDeleted} />
+			</div>
+
+			{#if playback.status !== 'READY' && playback.status !== 'FAILED'}
+				<p class="refresh-note">
+					This page updates automatically every
+					{Math.round((playback.pollIntervalMs ?? 5000) / 1000)} seconds while playback is being prepared.
+				</p>
 			{/if}
 		{/if}
 	</section>
@@ -184,30 +247,34 @@
 
 	.back-link {
 		display: inline-flex;
-		margin-bottom: 18px;
 		color: var(--accent);
 		font-weight: 700;
 	}
 
 	.playback-header {
-		display: flex;
-		justify-content: space-between;
-		gap: 18px;
-		align-items: start;
-		margin-bottom: 24px;
+		display: grid;
+		gap: 10px;
+		margin-bottom: 18px;
 	}
 
-	.details-grid {
+	.playback-title {
+		margin: 0;
+		font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+		font-size: clamp(1.85rem, 4vw, 2.6rem);
+		line-height: 1.05;
+	}
+
+	.details-grid,
+	.bottom-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 		gap: 14px;
-		margin-bottom: 18px;
+		margin-top: 18px;
 	}
 
 	.details-card,
 	.player-placeholder,
 	.player-card,
-	.polling-note,
 	.failure-card {
 		padding: 20px;
 		border-radius: 22px;
@@ -217,9 +284,8 @@
 
 	.player-card,
 	.player-placeholder,
-	.polling-note,
 	.failure-card {
-		margin-top: 18px;
+		margin-top: 12px;
 	}
 
 	.failure-card {
@@ -227,9 +293,11 @@
 		border-color: rgba(151, 30, 30, 0.14);
 	}
 
-	.failure-copy {
-		margin: 10px 0 0;
-		color: var(--danger);
+	.placeholder-copy,
+	.detail-copy,
+	.refresh-note {
+		margin: 0;
+		color: var(--text-muted);
 	}
 
 	.detail-label {
@@ -246,9 +314,11 @@
 		word-break: break-word;
 	}
 
-	@media (max-width: 720px) {
-		.playback-header {
-			flex-direction: column;
-		}
+	.detail-copy {
+		margin-top: 8px;
+	}
+
+	.refresh-note {
+		margin-top: 18px;
 	}
 </style>

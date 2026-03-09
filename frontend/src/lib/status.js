@@ -11,19 +11,19 @@ export function describeVideoStatus(status) {
 		case 'UPLOADING':
 			return 'Uploading';
 		case 'UPLOADED':
-			return 'Preparing video';
+			return 'Upload received';
 		case 'PROCESSING_BASELINE':
 			return 'Preparing video';
 		case 'BASELINE_READY':
 			return 'Ready to watch';
 		case 'PROCESSING_FULL':
-			return 'Ready to watch';
+			return 'More quality options are still being prepared';
 		case 'READY':
-			return 'Ready';
+			return 'Ready to watch';
 		case 'FAILED':
-			return 'Processing encountered an issue';
+			return 'Playback issue';
 		default:
-			return status;
+			return 'Updating';
 	}
 }
 

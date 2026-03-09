@@ -5,19 +5,17 @@
 	export let manifestUrl = null;
 	export let qualityOptions = [];
 	export let defaultQuality = 'auto';
-	export let title = 'Video';
 
 	let videoElement;
 	let hlsInstance = null;
 	let playbackError = '';
-	let currentSourceUrl = '';
+	let currentAttachmentKey = '';
 	let selectedQuality = defaultQuality;
 
 	$: qualityChoices = buildQualityChoices(manifestUrl, qualityOptions);
 	$: if (!qualityChoices.some((choice) => choice.value === selectedQuality)) {
 		selectedQuality = qualityChoices[0]?.value ?? 'auto';
 	}
-	$: selectedSourceUrl = resolveSelectedSourceUrl(manifestUrl, qualityOptions, selectedQuality);
 	$: if (videoElement) {
 		void syncPlayerSource();
 	}
@@ -55,8 +53,12 @@
 	}
 
 	async function syncPlayerSource() {
-		if (!selectedSourceUrl) {
-			currentSourceUrl = '';
+		const useNativeHls = supportsNativeHls();
+		const sourceUrl = resolvePlaybackSource(manifestUrl, qualityOptions, selectedQuality, useNativeHls);
+		const attachmentKey = buildAttachmentKey(sourceUrl, selectedQuality, useNativeHls);
+
+		if (!sourceUrl) {
+			currentAttachmentKey = '';
 			destroyHlsInstance();
 			if (videoElement) {
 				videoElement.removeAttribute('src');
@@ -65,7 +67,7 @@
 			return;
 		}
 
-		if (selectedSourceUrl === currentSourceUrl) {
+		if (attachmentKey === currentAttachmentKey) {
 			return;
 		}
 
@@ -75,18 +77,34 @@
 		playbackError = '';
 
 		try {
-			await attachSourceToPlayer(selectedSourceUrl, resumeTime, shouldResumePlayback);
-			currentSourceUrl = selectedSourceUrl;
+			await attachSourceToPlayer(sourceUrl, selectedQuality, resumeTime, shouldResumePlayback, useNativeHls);
+			currentAttachmentKey = attachmentKey;
 		} catch (error) {
 			playbackError =
 				error instanceof Error ? error.message : 'The browser could not start HLS playback.';
 		}
 	}
 
-	async function attachSourceToPlayer(sourceUrl, resumeTime, shouldResumePlayback) {
+	function resolvePlaybackSource(activeManifestUrl, options, activeQuality, useNativeHls) {
+		if (!useNativeHls && activeManifestUrl) {
+			return activeManifestUrl;
+		}
+
+		return resolveSelectedSourceUrl(activeManifestUrl, options, activeQuality);
+	}
+
+	function buildAttachmentKey(sourceUrl, activeQuality, useNativeHls) {
+		if (!sourceUrl) {
+			return '';
+		}
+
+		return useNativeHls ? sourceUrl : `${sourceUrl}#${activeQuality}`;
+	}
+
+	async function attachSourceToPlayer(sourceUrl, activeQuality, resumeTime, shouldResumePlayback, useNativeHls) {
 		destroyHlsInstance();
 
-		if (supportsNativeHls()) {
+		if (useNativeHls) {
 			attachNativeSource(sourceUrl, resumeTime, shouldResumePlayback);
 			return;
 		}
@@ -102,6 +120,7 @@
 		});
 
 		hls.on(HlsConstructor.Events.MANIFEST_PARSED, async () => {
+			applyHlsQualitySelection(hls, activeQuality);
 			await restorePlaybackState(resumeTime, shouldResumePlayback);
 		});
 		hls.on(HlsConstructor.Events.ERROR, (_event, data) => {
@@ -129,6 +148,36 @@
 		hls.loadSource(sourceUrl);
 		hls.attachMedia(videoElement);
 		hlsInstance = hls;
+	}
+
+	function applyHlsQualitySelection(hls, activeQuality) {
+		if (activeQuality === 'auto') {
+			hls.currentLevel = -1;
+			hls.nextLevel = -1;
+			hls.loadLevel = -1;
+			return;
+		}
+
+		const targetHeight = parseQualityHeight(activeQuality);
+
+		if (!targetHeight) {
+			return;
+		}
+
+		const levelIndex = hls.levels.findIndex((level) => level.height === targetHeight);
+
+		if (levelIndex === -1) {
+			return;
+		}
+
+		hls.currentLevel = levelIndex;
+		hls.nextLevel = levelIndex;
+		hls.loadLevel = levelIndex;
+	}
+
+	function parseQualityHeight(activeQuality) {
+		const match = /^(\d+)p$/i.exec(activeQuality);
+		return match ? Number.parseInt(match[1], 10) : null;
 	}
 
 	function attachNativeSource(sourceUrl, resumeTime, shouldResumePlayback) {
@@ -181,19 +230,21 @@
 </script>
 
 <div class="player-shell">
-	<div class="player-toolbar">
-		<div>
-			<p class="toolbar-label">Playback</p>
-			<p class="toolbar-copy">
-				Auto uses the master manifest for adaptive bitrate. Choosing a resolution locks playback to
-				that rendition playlist.
-			</p>
-		</div>
+	<video bind:this={videoElement} class="video-frame" controls playsinline preload="metadata">
+		Your browser does not support HTML5 video playback.
+	</video>
+
+	<div class="player-footer">
+		{#if playbackError}
+			<p class="player-error">{playbackError}</p>
+		{:else}
+			<div></div>
+		{/if}
 
 		{#if qualityChoices.length > 0}
 			<label class="quality-picker">
 				<span>Quality</span>
-				<select bind:value={selectedQuality}>
+				<select bind:value={selectedQuality} aria-label="Choose playback quality">
 					{#each qualityChoices as choice}
 						<option value={choice.value}>{choice.label}</option>
 					{/each}
@@ -201,24 +252,6 @@
 			</label>
 		{/if}
 	</div>
-
-	<video bind:this={videoElement} class="video-frame" controls playsinline preload="metadata">
-		Your browser does not support HTML5 video playback.
-	</video>
-
-	{#if playbackError}
-		<p class="player-error">{playbackError}</p>
-	{/if}
-
-	{#if selectedSourceUrl}
-		<p class="stream-hint">
-			{#if selectedQuality === 'auto'}
-				Streaming <strong>{title}</strong> with adaptive bitrate enabled.
-			{:else}
-				Streaming <strong>{title}</strong> locked to <strong>{selectedQuality}</strong>.
-			{/if}
-		</p>
-	{/if}
 </div>
 
 <style>
@@ -227,33 +260,12 @@
 		gap: 16px;
 	}
 
-	.player-toolbar {
-		display: flex;
-		justify-content: space-between;
-		gap: 18px;
-		align-items: end;
-	}
-
-	.toolbar-label {
-		margin: 0 0 6px;
-		font-size: 0.8rem;
-		font-weight: 700;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		color: var(--text-muted);
-	}
-
-	.toolbar-copy {
-		margin: 0;
-		max-width: 48rem;
-		color: var(--text-muted);
-	}
-
 	.quality-picker {
 		display: grid;
 		gap: 8px;
 		font-size: 0.86rem;
 		font-weight: 700;
+		justify-items: end;
 	}
 
 	.quality-picker select {
@@ -272,25 +284,28 @@
 		aspect-ratio: 16 / 9;
 	}
 
+	.player-footer {
+		display: flex;
+		justify-content: space-between;
+		align-items: start;
+		gap: 16px;
+	}
+
 	.player-error {
 		margin: 0;
 		color: var(--danger);
 		font-weight: 700;
 	}
 
-	.stream-hint {
-		margin: 0;
-		color: var(--text-muted);
-	}
-
 	@media (max-width: 720px) {
-		.player-toolbar {
+		.player-footer {
 			align-items: stretch;
 			flex-direction: column;
 		}
 
 		.quality-picker {
 			width: 100%;
+			justify-items: stretch;
 		}
 
 		.quality-picker select {

@@ -1,8 +1,7 @@
 <script>
 	import { createEventDispatcher } from 'svelte';
 	import DeleteVideoPanel from '$lib/components/DeleteVideoPanel.svelte';
-	import { formatDateTime } from '$lib/formatters';
-	import StatusBadge from '$lib/components/StatusBadge.svelte';
+	import { formatDate } from '$lib/formatters';
 	import { describeVideoStatus } from '$lib/status';
 
 	const dispatch = createEventDispatcher();
@@ -55,8 +54,7 @@
 				<article class="video-card">
 					<div class="video-card-content">
 						<div class="video-card-top">
-							<StatusBadge status={video.status} />
-							<span class="meta-text">{formatDateTime(video.createdAt)}</span>
+							<span class="meta-text">Uploaded {formatDate(video.createdAt)}</span>
 						</div>
 						<h3>{video.title || video.originalFilename}</h3>
 						<p>{describeVideoStatus(video.status)}</p>
