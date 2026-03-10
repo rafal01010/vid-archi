@@ -46,8 +46,6 @@ impl VideoDeleteService {
             return Err(AppError::forbidden("delete code is incorrect"));
         }
 
-        reject_delete_for_active_processing(&delete_context.status)?;
-
         if let Some(active_upload_id) = delete_context.active_upload_id.as_deref() {
             self.object_storage
                 .abort_multipart_upload_if_exists(&delete_context.source_s3_key, active_upload_id)
@@ -122,16 +120,6 @@ fn normalize_delete_code(delete_code: String) -> AppResult<String> {
     Ok(trimmed_delete_code.to_owned())
 }
 
-fn reject_delete_for_active_processing(status: &str) -> AppResult<()> {
-    if matches!(status, "PROCESSING_BASELINE") {
-        return Err(AppError::conflict(
-            "video is still preparing its first playable stream; try deleting it again after playback becomes available",
-        ));
-    }
-
-    Ok(())
-}
-
 fn map_deleted_video(
     deleted_video: DeletedVideoRecord,
     deleted_upload_object_count: u64,
@@ -146,7 +134,7 @@ fn map_deleted_video(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_delete_code, normalize_public_id, reject_delete_for_active_processing};
+    use super::{normalize_delete_code, normalize_public_id};
 
     #[test]
     fn normalize_public_id_rejects_blank_value() {
@@ -169,24 +157,4 @@ mod tests {
         assert_eq!(result, "delete-me");
     }
 
-    #[test]
-    fn reject_delete_for_active_processing_blocks_processing_states() {
-        let result = reject_delete_for_active_processing("PROCESSING_BASELINE");
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn reject_delete_for_active_processing_allows_ready_state() {
-        let result = reject_delete_for_active_processing("READY");
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn reject_delete_for_active_processing_allows_processing_full_state() {
-        let result = reject_delete_for_active_processing("PROCESSING_FULL");
-
-        assert!(result.is_ok());
-    }
 }

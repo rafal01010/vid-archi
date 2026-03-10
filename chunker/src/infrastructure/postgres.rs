@@ -96,6 +96,22 @@ impl ChunkerRepository {
         Ok(Some(claimed_job))
     }
 
+    pub async fn video_exists(&self, video_id: Uuid) -> AppResult<bool> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM videos
+                WHERE id = $1
+            )
+            "#,
+        )
+        .bind(video_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
     pub async fn dispatch_transcoding_jobs(
         &self,
         processing_job_id: Uuid,

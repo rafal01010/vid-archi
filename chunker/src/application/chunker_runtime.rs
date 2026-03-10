@@ -97,6 +97,11 @@ impl ChunkerRuntime {
             .prepare_processing_directory(&processing_directory)
             .await
         {
+            if !self.repository.video_exists(job.video_id).await? {
+                self.cleanup_processing_directory(&processing_directory);
+                return Ok(ChunkerProcessOutcome::Ignored { job_id: job.job_id });
+            }
+
             let failure = self
                 .repository
                 .mark_chunking_failed(
@@ -132,6 +137,15 @@ impl ChunkerRuntime {
                 transcoder_messages,
             }),
             Err(error) => {
+                if !self.repository.video_exists(job.video_id).await? {
+                    tracing::info!(
+                        job_id = %job.job_id,
+                        video_id = %job.video_id,
+                        "video was deleted while the chunker job was running; ignoring failure"
+                    );
+                    return Ok(ChunkerProcessOutcome::Ignored { job_id: job.job_id });
+                }
+
                 let failure = self
                     .repository
                     .mark_chunking_failed(
@@ -162,6 +176,15 @@ impl ChunkerRuntime {
             .await?;
         tracing::info!(path = %source_path.display(), "downloaded source object for chunking");
 
+        if !self.repository.video_exists(job.video_id).await? {
+            tracing::info!(
+                job_id = %job.job_id,
+                video_id = %job.video_id,
+                "video was deleted after the source download; skipping chunker work"
+            );
+            return Ok(Vec::new());
+        }
+
         let source_metadata = self.source_probe.probe(&source_path).await?;
         let baseline_rendition = self.policy.baseline_rendition_name();
         let additional_renditions = self
@@ -185,9 +208,28 @@ impl ChunkerRuntime {
             "prepared source media and split it into source segments"
         );
 
+        if !self.repository.video_exists(job.video_id).await? {
+            tracing::info!(
+                job_id = %job.job_id,
+                video_id = %job.video_id,
+                "video was deleted after segment preparation; skipping source-segment upload"
+            );
+            return Ok(Vec::new());
+        }
+
         let source_segments = self
             .upload_source_segments(job.video_id, &prepared_segments)
             .await?;
+
+        if !self.repository.video_exists(job.video_id).await? {
+            tracing::info!(
+                job_id = %job.job_id,
+                video_id = %job.video_id,
+                "video was deleted after source-segment upload; skipping transcoder dispatch"
+            );
+            return Ok(Vec::new());
+        }
+
         let queued_jobs = self
             .repository
             .dispatch_transcoding_jobs(
