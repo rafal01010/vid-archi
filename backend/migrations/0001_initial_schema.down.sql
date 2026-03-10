@@ -9,7 +9,6 @@ DROP TRIGGER IF EXISTS videos_set_updated_at ON videos;
 DROP TABLE IF EXISTS transcoding_jobs;
 DROP TABLE IF EXISTS processing_jobs;
 DROP TABLE IF EXISTS video_renditions;
-DROP TABLE IF EXISTS upload_parts;
 DROP TABLE IF EXISTS upload_sessions;
 DROP TABLE IF EXISTS videos;
 

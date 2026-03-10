@@ -4,6 +4,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Region;
+use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use tokio::io::AsyncWriteExt;
 
@@ -83,6 +84,39 @@ impl ObjectStorage {
         let mut body = response.body.into_async_read();
         tokio::io::copy(&mut body, &mut file).await?;
         file.flush().await?;
+
+        Ok(())
+    }
+
+    pub async fn upload_source_segment(&self, object_key: &str, local_path: &Path) -> AppResult<()> {
+        let file_bytes = tokio::fs::read(local_path).await.map_err(|error| {
+            AppError::internal_with_context(
+                "failed to read generated source segment before upload",
+                format!("file={} error={error}", local_path.display()),
+            )
+        })?;
+        let file_size_bytes = file_bytes.len() as i64;
+
+        self.client
+            .put_object()
+            .bucket(&self.upload_bucket)
+            .key(object_key)
+            .content_type("video/x-matroska")
+            .content_length(file_size_bytes)
+            .body(ByteStream::from(file_bytes))
+            .send()
+            .await
+            .map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to upload generated source segment",
+                    format!(
+                        "bucket={} key={} file={} error={error}",
+                        self.upload_bucket,
+                        object_key,
+                        local_path.display()
+                    ),
+                )
+            })?;
 
         Ok(())
     }

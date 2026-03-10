@@ -248,22 +248,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS upload_sessions_one_open_session_per_video_idx
   ON upload_sessions (video_id)
   WHERE status = 'OPEN';
 
-CREATE TABLE IF NOT EXISTS upload_parts (
-  session_id UUID NOT NULL REFERENCES upload_sessions (id) ON DELETE CASCADE,
-  part_number INTEGER NOT NULL,
-  etag TEXT NOT NULL,
-  size_bytes BIGINT NOT NULL,
-  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (session_id, part_number),
-  CONSTRAINT upload_parts_part_number_valid
-    CHECK (part_number > 0 AND part_number <= 10000),
-  CONSTRAINT upload_parts_size_bytes_valid
-    CHECK (size_bytes > 0)
-);
-
-CREATE INDEX IF NOT EXISTS upload_parts_uploaded_at_idx
-  ON upload_parts (uploaded_at DESC);
-
 CREATE TABLE IF NOT EXISTS video_renditions (
   video_id UUID NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
   rendition video_rendition_name NOT NULL,
@@ -365,17 +349,25 @@ CREATE TABLE IF NOT EXISTS transcoding_jobs (
   processing_job_id UUID NOT NULL REFERENCES processing_jobs (id) ON DELETE CASCADE,
   video_id UUID NOT NULL REFERENCES videos (id) ON DELETE CASCADE,
   rendition video_rendition_name NOT NULL,
+  segment_index INTEGER NOT NULL,
+  source_segment_s3_key TEXT NOT NULL,
+  source_segment_duration_seconds DOUBLE PRECISION NOT NULL,
   attempt INTEGER NOT NULL DEFAULT 1,
   status transcoding_job_status NOT NULL DEFAULT 'QUEUED',
   correlation_id TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   worker_id TEXT,
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
+  output_segment_s3_key TEXT,
   error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT transcoding_jobs_attempt_valid
     CHECK (attempt > 0),
+  CONSTRAINT transcoding_jobs_segment_index_valid
+    CHECK (segment_index >= 0),
+  CONSTRAINT transcoding_jobs_source_segment_duration_valid
+    CHECK (source_segment_duration_seconds > 0),
   CONSTRAINT transcoding_jobs_status_timestamps_valid
     CHECK (
       (
@@ -394,20 +386,28 @@ CREATE TABLE IF NOT EXISTS transcoding_jobs (
         AND finished_at IS NOT NULL
         AND finished_at >= started_at
       )
+    ),
+  CONSTRAINT transcoding_jobs_succeeded_requires_output_segment
+    CHECK (
+      status <> 'SUCCEEDED'
+      OR output_segment_s3_key IS NOT NULL
     )
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS transcoding_jobs_video_id_rendition_attempt_idx
-  ON transcoding_jobs (video_id, rendition, attempt);
+CREATE UNIQUE INDEX IF NOT EXISTS transcoding_jobs_video_id_rendition_segment_attempt_idx
+  ON transcoding_jobs (video_id, rendition, segment_index, attempt);
 
-CREATE UNIQUE INDEX IF NOT EXISTS transcoding_jobs_processing_job_id_rendition_attempt_idx
-  ON transcoding_jobs (processing_job_id, rendition, attempt);
+CREATE UNIQUE INDEX IF NOT EXISTS transcoding_jobs_processing_job_id_rendition_segment_attempt_idx
+  ON transcoding_jobs (processing_job_id, rendition, segment_index, attempt);
 
 CREATE INDEX IF NOT EXISTS transcoding_jobs_status_idx
   ON transcoding_jobs (status);
 
 CREATE INDEX IF NOT EXISTS transcoding_jobs_rendition_status_idx
-  ON transcoding_jobs (rendition, status, created_at);
+  ON transcoding_jobs (rendition, status, segment_index, created_at);
+
+CREATE INDEX IF NOT EXISTS transcoding_jobs_video_id_rendition_segment_idx
+  ON transcoding_jobs (video_id, rendition, segment_index, attempt DESC);
 
 CREATE INDEX IF NOT EXISTS transcoding_jobs_correlation_id_idx
   ON transcoding_jobs (correlation_id);

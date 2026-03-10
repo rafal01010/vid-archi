@@ -5,10 +5,11 @@ This crate is the second processing stage for the split media pipeline.
 Responsibilities:
 - receive rendition work from the transcoder SQS queue, then atomically claim the matching row from `transcoding_jobs`
 - run only for one configured `TRANSCODER_RENDITION`
-- download the source object
-- build HLS artifacts for that rendition with `ffmpeg`
+- download one source segment for the claimed job
+- transcode that segment into the configured rendition with `ffmpeg`
+- upload the processed segment to the processed bucket
+- assemble the final rendition playlist after the last segment for that rendition finishes
 - rebuild and upload `master.m3u8` so `Auto` playback stays aligned with ready renditions
-- upload playlists and segments to the processed bucket
 - mark baseline streamability when the `360p` rendition finishes
 - publish queued higher-rendition jobs to the transcoder SQS queue after baseline playback becomes available
 - move additional-rendition work through `PROCESSING_FULL` and finish at `READY`
@@ -16,7 +17,7 @@ Responsibilities:
 Container model:
 - one Docker service definition exists per rendition
 - you can scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently
-- that is how the service scales packaging pressure by resolution
+- that is how the service scales segment-transcoding pressure by resolution
 
 Logging behavior:
 - logs are emitted as structured JSON

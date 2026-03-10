@@ -50,9 +50,11 @@ impl TranscoderRepository {
                     tj.id AS transcoding_job_id,
                     tj.processing_job_id,
                     tj.video_id,
-                    tj.attempt,
                     tj.rendition::text AS rendition,
-                    v.source_s3_key,
+                    tj.segment_index,
+                    tj.source_segment_s3_key,
+                    tj.source_segment_duration_seconds,
+                    tj.attempt,
                     v.source_width,
                     v.source_height,
                     tj.correlation_id
@@ -81,9 +83,11 @@ impl TranscoderRepository {
                 tj.id AS transcoding_job_id,
                 candidate.processing_job_id,
                 candidate.video_id,
-                candidate.attempt,
                 candidate.rendition,
-                candidate.source_s3_key,
+                candidate.segment_index,
+                candidate.source_segment_s3_key,
+                candidate.source_segment_duration_seconds,
+                candidate.attempt,
                 candidate.source_width,
                 candidate.source_height,
                 candidate.correlation_id
@@ -115,9 +119,11 @@ impl TranscoderRepository {
                     tj.id AS transcoding_job_id,
                     tj.processing_job_id,
                     tj.video_id,
-                    tj.attempt,
                     tj.rendition::text AS rendition,
-                    v.source_s3_key,
+                    tj.segment_index,
+                    tj.source_segment_s3_key,
+                    tj.source_segment_duration_seconds,
+                    tj.attempt,
                     v.source_width,
                     v.source_height,
                     tj.correlation_id
@@ -146,9 +152,11 @@ impl TranscoderRepository {
                 tj.id AS transcoding_job_id,
                 candidate.processing_job_id,
                 candidate.video_id,
-                candidate.attempt,
                 candidate.rendition,
-                candidate.source_s3_key,
+                candidate.segment_index,
+                candidate.source_segment_s3_key,
+                candidate.source_segment_duration_seconds,
+                candidate.attempt,
                 candidate.source_width,
                 candidate.source_height,
                 candidate.correlation_id
@@ -213,6 +221,7 @@ impl TranscoderRepository {
                 tj.processing_job_id,
                 tj.video_id,
                 tj.rendition::text AS rendition,
+                tj.segment_index,
                 tj.correlation_id,
                 tj.attempt
             FROM transcoding_jobs tj
@@ -221,7 +230,7 @@ impl TranscoderRepository {
             WHERE tj.video_id = $1
               AND tj.status = 'QUEUED'::transcoding_job_status
               AND p.job_type = 'ADDITIONAL_RENDITIONS'::processing_job_type
-            ORDER BY tj.created_at ASC
+            ORDER BY tj.rendition ASC, tj.segment_index ASC, tj.created_at ASC
             "#,
         )
         .bind(video_id)
@@ -357,6 +366,67 @@ impl TranscoderRepository {
         Ok(())
     }
 
+    pub async fn mark_transcoding_segment_succeeded_in_session(
+        &self,
+        session: &mut VideoCompletionSession,
+        transcoding_job_id: Uuid,
+        output_segment_s3_key: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE transcoding_jobs
+            SET status = 'SUCCEEDED'::transcoding_job_status,
+                output_segment_s3_key = $2,
+                finished_at = NOW(),
+                error = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+              AND status = 'RUNNING'::transcoding_job_status
+            "#,
+        )
+        .bind(transcoding_job_id)
+        .bind(output_segment_s3_key)
+        .execute(&mut *session.connection)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn list_latest_segment_job_states_in_session(
+        &self,
+        session: &mut VideoCompletionSession,
+        video_id: Uuid,
+        rendition_name: &str,
+    ) -> AppResult<Vec<LatestSegmentJobStateRecord>> {
+        sqlx::query_as::<_, LatestSegmentJobStateRecord>(
+            r#"
+            WITH latest_attempts AS (
+                SELECT DISTINCT ON (segment_index)
+                    segment_index,
+                    status::text AS status,
+                    source_segment_duration_seconds,
+                    output_segment_s3_key
+                FROM transcoding_jobs
+                WHERE video_id = $1
+                  AND rendition = $2::video_rendition_name
+                ORDER BY segment_index, attempt DESC
+            )
+            SELECT
+                segment_index,
+                status,
+                source_segment_duration_seconds,
+                output_segment_s3_key
+            FROM latest_attempts
+            ORDER BY segment_index ASC
+            "#,
+        )
+        .bind(video_id)
+        .bind(rendition_name)
+        .fetch_all(&mut *session.connection)
+        .await
+        .map_err(AppError::from)
+    }
+
     pub async fn list_ready_manifest_variants_in_session(
         &self,
         session: &mut VideoCompletionSession,
@@ -382,10 +452,10 @@ impl TranscoderRepository {
         .map_err(AppError::from)
     }
 
-    pub async fn mark_transcoding_succeeded_in_session(
+    pub async fn mark_rendition_ready_in_session(
         &self,
         session: &mut VideoCompletionSession,
-        update: TranscodingCompletionUpdate,
+        update: RenditionCompletionUpdate,
         video_progress: VideoProgressUpdate,
     ) -> AppResult<()> {
         sqlx::query(
@@ -415,21 +485,6 @@ impl TranscoderRepository {
         .bind(update.target_video_bitrate_kbps)
         .bind(update.target_audio_bitrate_kbps)
         .bind(update.segment_count)
-        .execute(&mut *session.connection)
-        .await?;
-
-        sqlx::query(
-            r#"
-            UPDATE transcoding_jobs
-            SET status = 'SUCCEEDED'::transcoding_job_status,
-                finished_at = NOW(),
-                error = NULL,
-                updated_at = NOW()
-            WHERE id = $1
-              AND status = 'RUNNING'::transcoding_job_status
-            "#,
-        )
-        .bind(update.transcoding_job_id)
         .execute(&mut *session.connection)
         .await?;
 
@@ -519,8 +574,11 @@ impl TranscoderRepository {
         transcoding_job_id: Uuid,
         processing_job_id: Uuid,
         video_id: Uuid,
-        attempt: i32,
+        segment_index: i32,
         rendition_name: &str,
+        source_segment_s3_key: &str,
+        source_segment_duration_seconds: f64,
+        attempt: i32,
         error_message: &str,
         max_transcoding_attempts: i32,
         is_baseline_rendition: bool,
@@ -545,6 +603,57 @@ impl TranscoderRepository {
         .execute(&mut *transaction)
         .await?;
 
+        if attempt < max_transcoding_attempts {
+            let retry_transcoding_job_id = Uuid::new_v4();
+            sqlx::query(
+                r#"
+                INSERT INTO transcoding_jobs (
+                    id,
+                    processing_job_id,
+                    video_id,
+                    rendition,
+                    segment_index,
+                    source_segment_s3_key,
+                    source_segment_duration_seconds,
+                    attempt,
+                    status,
+                    correlation_id
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4::video_rendition_name,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    'QUEUED'::transcoding_job_status,
+                    $9
+                )
+                ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
+                "#,
+            )
+            .bind(retry_transcoding_job_id)
+            .bind(processing_job_id)
+            .bind(video_id)
+            .bind(rendition_name)
+            .bind(segment_index)
+            .bind(source_segment_s3_key)
+            .bind(source_segment_duration_seconds)
+            .bind(attempt + 1)
+            .bind(correlation_id)
+            .execute(&mut *transaction)
+            .await?;
+
+            transaction.commit().await?;
+
+            return Ok(TranscodingFailureDisposition::RetryQueued {
+                retry_transcoding_job_id,
+                next_attempt: attempt + 1,
+            });
+        }
+
         sqlx::query(
             r#"
             UPDATE video_renditions
@@ -558,48 +667,6 @@ impl TranscoderRepository {
         .bind(rendition_name)
         .execute(&mut *transaction)
         .await?;
-
-        if attempt < max_transcoding_attempts {
-            let retry_transcoding_job_id = Uuid::new_v4();
-            sqlx::query(
-                r#"
-                INSERT INTO transcoding_jobs (
-                    id,
-                    processing_job_id,
-                    video_id,
-                    rendition,
-                    attempt,
-                    status,
-                    correlation_id
-                )
-                VALUES (
-                    $1,
-                    $2,
-                    $3,
-                    $4::video_rendition_name,
-                    $5,
-                    'QUEUED'::transcoding_job_status,
-                    $6
-                )
-                ON CONFLICT (video_id, rendition, attempt) DO NOTHING
-                "#,
-            )
-            .bind(retry_transcoding_job_id)
-            .bind(processing_job_id)
-            .bind(video_id)
-            .bind(rendition_name)
-            .bind(attempt + 1)
-            .bind(correlation_id)
-            .execute(&mut *transaction)
-            .await?;
-
-            transaction.commit().await?;
-
-            return Ok(TranscodingFailureDisposition::RetryQueued {
-                retry_transcoding_job_id,
-                next_attempt: attempt + 1,
-            });
-        }
 
         if is_baseline_rendition {
             sqlx::query(
@@ -694,17 +761,18 @@ pub struct ClaimedTranscodingJob {
     pub transcoding_job_id: Uuid,
     pub processing_job_id: Uuid,
     pub video_id: Uuid,
-    pub attempt: i32,
     pub rendition: String,
-    pub source_s3_key: String,
+    pub segment_index: i32,
+    pub source_segment_s3_key: String,
+    pub source_segment_duration_seconds: f64,
+    pub attempt: i32,
     pub source_width: Option<i32>,
     pub source_height: Option<i32>,
     pub correlation_id: String,
 }
 
 #[derive(Debug)]
-pub struct TranscodingCompletionUpdate {
-    pub transcoding_job_id: Uuid,
+pub struct RenditionCompletionUpdate {
     pub processing_job_id: Uuid,
     pub video_id: Uuid,
     pub rendition_name: String,
@@ -739,14 +807,23 @@ pub struct ReadyManifestVariantRecord {
     pub target_audio_bitrate_kbps: Option<i32>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, Clone)]
 pub struct QueuedTranscodingJobRecord {
     pub transcoding_job_id: Uuid,
     pub processing_job_id: Uuid,
     pub video_id: Uuid,
     pub rendition: String,
+    pub segment_index: i32,
     pub correlation_id: String,
     pub attempt: i32,
+}
+
+#[derive(Debug, FromRow)]
+pub struct LatestSegmentJobStateRecord {
+    pub segment_index: i32,
+    pub status: String,
+    pub source_segment_duration_seconds: f64,
+    pub output_segment_s3_key: Option<String>,
 }
 
 #[derive(Debug)]

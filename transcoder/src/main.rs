@@ -57,18 +57,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 transcoding_job_id,
                 video_id,
                 rendition,
+                segment_index,
                 follow_up_jobs,
             }) => {
                 queue_consumer.delete(&message.receipt_handle).await?;
                 for follow_up_job in follow_up_jobs {
                     queue_publisher.enqueue(follow_up_job).await?;
                 }
-                tracing::info!(%transcoding_job_id, %video_id, %rendition, "transcoder completed rendition job");
+                tracing::info!(%transcoding_job_id, %video_id, %rendition, %segment_index, "transcoder completed segment job");
             }
             Ok(TranscoderProcessOutcome::RetryQueued {
                 transcoding_job_id,
                 video_id,
                 rendition,
+                segment_index,
                 next_attempt,
                 retry_job_message,
             }) => {
@@ -78,6 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     %transcoding_job_id,
                     %video_id,
                     %rendition,
+                    %segment_index,
                     %next_attempt,
                     "transcoder failure scheduled a retry"
                 );
@@ -86,12 +89,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 transcoding_job_id,
                 video_id,
                 rendition,
+                segment_index,
             }) => {
                 queue_consumer.delete(&message.receipt_handle).await?;
                 tracing::error!(
                     %transcoding_job_id,
                     %video_id,
                     %rendition,
+                    %segment_index,
                     "transcoder failure reached the terminal attempt limit"
                 );
             }

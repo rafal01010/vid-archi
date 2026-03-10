@@ -105,10 +105,10 @@ impl ChunkerRepository {
         source_height: u32,
         baseline_rendition_name: &str,
         additional_rendition_names: &[String],
+        source_segments: &[SourceSegmentRecord],
         attempt: i32,
-    ) -> AppResult<DispatchTranscodingJobsResult> {
+    ) -> AppResult<Vec<QueuedTranscodingJobRecord>> {
         let mut transaction = self.pool.begin().await?;
-        let baseline_transcoding_job_id = Uuid::new_v4();
 
         sqlx::query(
             r#"
@@ -125,37 +125,48 @@ impl ChunkerRepository {
         .execute(&mut *transaction)
         .await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO transcoding_jobs (
-                id,
-                processing_job_id,
-                video_id,
-                rendition,
-                attempt,
-                status,
-                correlation_id
+        for source_segment in source_segments {
+            sqlx::query(
+                r#"
+                INSERT INTO transcoding_jobs (
+                    id,
+                    processing_job_id,
+                    video_id,
+                    rendition,
+                    segment_index,
+                    source_segment_s3_key,
+                    source_segment_duration_seconds,
+                    attempt,
+                    status,
+                    correlation_id
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4::video_rendition_name,
+                    $5,
+                    $6,
+                    $7,
+                    $8,
+                    'QUEUED'::transcoding_job_status,
+                    $9
+                )
+                ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
+                "#,
             )
-            VALUES (
-                $1,
-                $2,
-                $3,
-                $4::video_rendition_name,
-                $5,
-                'QUEUED'::transcoding_job_status,
-                $6
-            )
-            ON CONFLICT (video_id, rendition, attempt) DO NOTHING
-            "#,
-        )
-        .bind(baseline_transcoding_job_id)
-        .bind(processing_job_id)
-        .bind(video_id)
-        .bind(baseline_rendition_name)
-        .bind(attempt)
-        .bind(correlation_id)
-        .execute(&mut *transaction)
-        .await?;
+            .bind(Uuid::new_v4())
+            .bind(processing_job_id)
+            .bind(video_id)
+            .bind(baseline_rendition_name)
+            .bind(source_segment.segment_index)
+            .bind(&source_segment.source_segment_s3_key)
+            .bind(source_segment.duration_seconds)
+            .bind(attempt)
+            .bind(correlation_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
 
         if !additional_rendition_names.is_empty() {
             let additional_renditions_job_id = Uuid::new_v4();
@@ -202,61 +213,104 @@ impl ChunkerRepository {
             .await?;
 
             for rendition_name in additional_rendition_names {
-                sqlx::query(
-                    r#"
-                    INSERT INTO transcoding_jobs (
-                        id,
-                        processing_job_id,
-                        video_id,
-                        rendition,
-                        attempt,
-                        status,
-                        correlation_id
+                for source_segment in source_segments {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO transcoding_jobs (
+                            id,
+                            processing_job_id,
+                            video_id,
+                            rendition,
+                            segment_index,
+                            source_segment_s3_key,
+                            source_segment_duration_seconds,
+                            attempt,
+                            status,
+                            correlation_id
+                        )
+                        VALUES (
+                            $1,
+                            $2,
+                            $3,
+                            $4::video_rendition_name,
+                            $5,
+                            $6,
+                            $7,
+                            1,
+                            'QUEUED'::transcoding_job_status,
+                            $8
+                        )
+                        ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
+                        "#,
                     )
-                    VALUES (
-                        $1,
-                        $2,
-                        $3,
-                        $4::video_rendition_name,
-                        1,
-                        'QUEUED'::transcoding_job_status,
-                        $5
-                    )
-                    ON CONFLICT (video_id, rendition, attempt) DO NOTHING
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(queued_additional_job_id)
-                .bind(video_id)
-                .bind(rendition_name)
-                .bind(correlation_id)
-                .execute(&mut *transaction)
-                .await?;
+                    .bind(Uuid::new_v4())
+                    .bind(queued_additional_job_id)
+                    .bind(video_id)
+                    .bind(rendition_name)
+                    .bind(source_segment.segment_index)
+                    .bind(&source_segment.source_segment_s3_key)
+                    .bind(source_segment.duration_seconds)
+                    .bind(correlation_id)
+                    .execute(&mut *transaction)
+                    .await?;
+                }
             }
         }
 
-        let persisted_baseline_transcoding_job_id = sqlx::query_scalar::<_, Uuid>(
+        let baseline_jobs = sqlx::query_as::<_, QueuedTranscodingJobRecord>(
             r#"
-            SELECT id
+            SELECT
+                id AS transcoding_job_id,
+                processing_job_id,
+                video_id,
+                rendition::text AS rendition,
+                segment_index,
+                correlation_id,
+                attempt
             FROM transcoding_jobs
             WHERE video_id = $1
-              AND rendition = $2::video_rendition_name
-              AND attempt = $3
-            ORDER BY created_at ASC
-            LIMIT 1
+              AND processing_job_id = $2
+              AND rendition = $3::video_rendition_name
+              AND attempt = $4
+            ORDER BY segment_index ASC
             "#,
         )
         .bind(video_id)
+        .bind(processing_job_id)
         .bind(baseline_rendition_name)
         .bind(attempt)
-        .fetch_one(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
 
         transaction.commit().await?;
 
-        Ok(DispatchTranscodingJobsResult {
-            baseline_transcoding_job_id: persisted_baseline_transcoding_job_id,
-        })
+        Ok(baseline_jobs)
+    }
+
+    pub async fn list_queued_transcoding_jobs_for_processing_job(
+        &self,
+        processing_job_id: Uuid,
+    ) -> AppResult<Vec<QueuedTranscodingJobRecord>> {
+        sqlx::query_as::<_, QueuedTranscodingJobRecord>(
+            r#"
+            SELECT
+                id AS transcoding_job_id,
+                processing_job_id,
+                video_id,
+                rendition::text AS rendition,
+                segment_index,
+                correlation_id,
+                attempt
+            FROM transcoding_jobs
+            WHERE processing_job_id = $1
+              AND status = 'QUEUED'::transcoding_job_status
+            ORDER BY segment_index ASC, rendition ASC
+            "#,
+        )
+        .bind(processing_job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::from)
     }
 
     pub async fn mark_chunking_failed(
@@ -382,6 +436,13 @@ pub struct ClaimedBaselineJob {
     pub correlation_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SourceSegmentRecord {
+    pub segment_index: i32,
+    pub source_segment_s3_key: String,
+    pub duration_seconds: f64,
+}
+
 #[derive(Debug)]
 pub enum ChunkerFailureDisposition {
     RetryQueued {
@@ -391,7 +452,13 @@ pub enum ChunkerFailureDisposition {
     Terminal,
 }
 
-#[derive(Debug)]
-pub struct DispatchTranscodingJobsResult {
-    pub baseline_transcoding_job_id: Uuid,
+#[derive(Debug, FromRow, Clone)]
+pub struct QueuedTranscodingJobRecord {
+    pub transcoding_job_id: Uuid,
+    pub processing_job_id: Uuid,
+    pub video_id: Uuid,
+    pub rendition: String,
+    pub segment_index: i32,
+    pub correlation_id: String,
+    pub attempt: i32,
 }

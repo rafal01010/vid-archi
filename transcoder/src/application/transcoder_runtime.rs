@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,12 +10,13 @@ use crate::infrastructure::config::TranscoderConfig;
 use crate::infrastructure::message_queue::TranscoderJobMessage;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
-    ClaimedTranscodingJob, QueuedTranscodingJobRecord, ReadyManifestVariantRecord,
-    TranscoderRepository, TranscodingCompletionUpdate, TranscodingFailureDisposition,
-    VideoProgressUpdate,
+    ClaimedTranscodingJob, LatestSegmentJobStateRecord, QueuedTranscodingJobRecord,
+    ReadyManifestVariantRecord, RenditionCompletionUpdate, TranscoderRepository,
+    TranscodingFailureDisposition, VideoProgressUpdate,
 };
 use crate::media::{
-    render_master_manifest, MasterManifestVariant, MediaProcessor, PackagedRendition,
+    render_master_manifest, render_variant_playlist, MasterManifestVariant, MediaProcessor,
+    TranscodedSegment, VariantPlaylistSegment,
 };
 
 #[derive(Debug)]
@@ -23,12 +25,14 @@ pub enum TranscoderProcessOutcome {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
+        segment_index: i32,
         follow_up_jobs: Vec<TranscoderJobMessage>,
     },
     RetryQueued {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
+        segment_index: i32,
         next_attempt: i32,
         retry_job_message: TranscoderJobMessage,
     },
@@ -36,6 +40,7 @@ pub enum TranscoderProcessOutcome {
         transcoding_job_id: uuid::Uuid,
         video_id: uuid::Uuid,
         rendition: String,
+        segment_index: i32,
     },
     Ignored {
         transcoding_job_id: uuid::Uuid,
@@ -100,6 +105,25 @@ impl TranscoderRuntime {
             )
             .await?
         else {
+            if is_baseline_rendition {
+                let follow_up_jobs = self
+                    .repository
+                    .list_queued_additional_transcoding_jobs(queue_message.video_id)
+                    .await?;
+                if !follow_up_jobs.is_empty() {
+                    return Ok(TranscoderProcessOutcome::Processed {
+                        transcoding_job_id: queue_message.transcoding_job_id,
+                        video_id: queue_message.video_id,
+                        rendition: queue_message.rendition.clone(),
+                        segment_index: queue_message.segment_index,
+                        follow_up_jobs: follow_up_jobs
+                            .into_iter()
+                            .map(map_queued_job_to_message)
+                            .collect(),
+                    });
+                }
+            }
+
             return Ok(TranscoderProcessOutcome::Ignored {
                 transcoding_job_id: queue_message.transcoding_job_id,
             });
@@ -117,8 +141,11 @@ impl TranscoderRuntime {
                     job.transcoding_job_id,
                     job.processing_job_id,
                     job.video_id,
-                    job.attempt,
+                    job.segment_index,
                     &job.rendition,
+                    &job.source_segment_s3_key,
+                    job.source_segment_duration_seconds,
+                    job.attempt,
                     &error.to_string(),
                     self.config.max_transcoding_attempts,
                     self.policy.is_baseline_rendition(&job.rendition),
@@ -136,6 +163,7 @@ impl TranscoderRuntime {
             processing_job_id = %job.processing_job_id,
             video_id = %job.video_id,
             rendition = %job.rendition,
+            segment_index = job.segment_index,
             attempt = job.attempt
         );
         let outcome = self
@@ -149,6 +177,7 @@ impl TranscoderRuntime {
                 transcoding_job_id: job.transcoding_job_id,
                 video_id: job.video_id,
                 rendition: job.rendition.clone(),
+                segment_index: job.segment_index,
                 follow_up_jobs,
             }),
             Err(error) => {
@@ -158,8 +187,11 @@ impl TranscoderRuntime {
                         job.transcoding_job_id,
                         job.processing_job_id,
                         job.video_id,
-                        job.attempt,
+                        job.segment_index,
                         &job.rendition,
+                        &job.source_segment_s3_key,
+                        job.source_segment_duration_seconds,
+                        job.attempt,
                         &error.to_string(),
                         self.config.max_transcoding_attempts,
                         self.policy.is_baseline_rendition(&job.rendition),
@@ -170,6 +202,7 @@ impl TranscoderRuntime {
                     transcoding_job_id = %job.transcoding_job_id,
                     video_id = %job.video_id,
                     rendition = %job.rendition,
+                    segment_index = job.segment_index,
                     attempt = job.attempt,
                     error = %error,
                     "transcoder job failed"
@@ -184,7 +217,11 @@ impl TranscoderRuntime {
         job: &ClaimedTranscodingJob,
         processing_directory: &PathBuf,
     ) -> AppResult<Vec<TranscoderJobMessage>> {
-        tracing::info!(source_s3_key = %job.source_s3_key, "claimed transcoding job");
+        tracing::info!(
+            source_segment_s3_key = %job.source_segment_s3_key,
+            segment_index = job.segment_index,
+            "claimed transcoding segment job"
+        );
 
         let source_width = job.source_width.ok_or_else(|| {
             AppError::conflict("source width is missing; chunker must persist it first")
@@ -198,74 +235,127 @@ impl TranscoderRuntime {
             .ok_or_else(|| {
                 AppError::conflict("requested rendition is not defined in the video policy")
             })?;
-        let source_path = processing_directory.join("source").join("original");
+        let source_path = processing_directory
+            .join("source")
+            .join(format!("segment_{:05}.mkv", job.segment_index));
 
         self.object_storage
-            .download_source_object(&job.source_s3_key, &source_path)
+            .download_source_object(&job.source_segment_s3_key, &source_path)
             .await?;
         tracing::info!(
             path = %source_path.display(),
             source_width,
             source_height,
-            "downloaded source object for transcoding"
+            segment_index = job.segment_index,
+            "downloaded source segment for transcoding"
         );
 
-        let packaged = self
+        let transcoded_segment = self
             .media_processor
-            .package_rendition_hls(
+            .transcode_segment(
                 &source_path,
                 &processing_directory.join("hls"),
                 &rendition_profile,
                 source_width as u32,
                 source_height as u32,
+                job.segment_index,
             )
             .await?;
         tracing::info!(
             rendition = %job.rendition,
-            output_width = packaged.output_width,
-            output_height = packaged.output_height,
-            segment_count = packaged.segment_count,
-            "packaged HLS rendition"
+            segment_index = job.segment_index,
+            output_width = transcoded_segment.output_width,
+            output_height = transcoded_segment.output_height,
+            "transcoded rendition segment"
         );
 
+        let playlist_key = format!(
+            "videos/{}/hls/{}/{}",
+            job.video_id, job.rendition, rendition_profile.variant_playlist_file_name
+        );
         self.repository
             .mark_rendition_processing(
                 job.video_id,
                 &job.rendition,
-                &packaged.codec,
-                &packaged.container,
-                &format!(
-                    "videos/{}/hls/{}/{}",
-                    job.video_id, job.rendition, packaged.playlist_file_name
-                ),
-                packaged.output_width as i32,
-                packaged.output_height as i32,
-                packaged.target_video_bitrate_kbps as i32,
-                packaged.target_audio_bitrate_kbps as i32,
+                &transcoded_segment.codec,
+                &transcoded_segment.container,
+                &playlist_key,
+                transcoded_segment.output_width as i32,
+                transcoded_segment.output_height as i32,
+                transcoded_segment.target_video_bitrate_kbps as i32,
+                transcoded_segment.target_audio_bitrate_kbps as i32,
             )
             .await?;
 
+        let output_segment_key = format!(
+            "videos/{}/hls/{}/segments/{}",
+            job.video_id, job.rendition, transcoded_segment.output_segment_file_name
+        );
+        let output_segment_path = processing_directory
+            .join("hls")
+            .join(&job.rendition)
+            .join("segments")
+            .join(&transcoded_segment.output_segment_file_name);
         self.object_storage
-            .upload_processing_directory(
-                &format!("videos/{}/hls/{}", job.video_id, job.rendition),
-                &processing_directory.join("hls").join(&job.rendition),
-            )
+            .upload_processing_file(&output_segment_key, &output_segment_path)
             .await?;
-        tracing::info!("uploaded rendition artifacts to processed storage");
+        tracing::info!(segment_index = job.segment_index, output_segment_key = %output_segment_key, "uploaded transcoded segment to processed storage");
 
         let mut completion_session = self
             .repository
             .begin_video_completion_session(job.video_id)
             .await?;
         let completion_result = async {
+            self.repository
+                .mark_transcoding_segment_succeeded_in_session(
+                    &mut completion_session,
+                    job.transcoding_job_id,
+                    &output_segment_key,
+                )
+                .await?;
+
+            let latest_segment_states = self
+                .repository
+                .list_latest_segment_job_states_in_session(
+                    &mut completion_session,
+                    job.video_id,
+                    &job.rendition,
+                )
+                .await?;
+
+            if !all_segments_ready(&latest_segment_states) {
+                return Ok((Vec::new(), false));
+            }
+
+            let variant_playlist_segments = self.build_variant_playlist_segments(
+                job.video_id,
+                &job.rendition,
+                &latest_segment_states,
+            )?;
+            let variant_playlist_key = playlist_key.clone();
+            let variant_playlist_path = self
+                .write_variant_playlist(
+                    processing_directory,
+                    &job.rendition,
+                    &rendition_profile.variant_playlist_file_name,
+                    &variant_playlist_segments,
+                )
+                .await?;
+            self.object_storage
+                .upload_processing_file(&variant_playlist_key, &variant_playlist_path)
+                .await?;
+            tracing::info!(playlist_key = %variant_playlist_key, rendition = %job.rendition, "uploaded completed rendition playlist");
+
             let existing_ready_variants = self
                 .repository
                 .list_ready_manifest_variants_in_session(&mut completion_session, job.video_id)
                 .await?;
             let manifest_variants = self.build_master_manifest_variants(
                 job.video_id,
-                &packaged,
+                &job.rendition,
+                &transcoded_segment,
                 existing_ready_variants,
+                &variant_playlist_key,
             );
             let master_manifest_key = self
                 .write_master_manifest(job.video_id, processing_directory, &manifest_variants)
@@ -285,75 +375,128 @@ impl TranscoderRuntime {
                 &manifest_variants,
                 &master_manifest_key,
             );
-            let completion = self.build_completion_update(job, &packaged);
+            let should_cleanup_source_segments =
+                matches!(video_progress, VideoProgressUpdate::Ready { .. });
+            let completion = RenditionCompletionUpdate {
+                processing_job_id: job.processing_job_id,
+                video_id: job.video_id,
+                rendition_name: job.rendition.clone(),
+                codec: transcoded_segment.codec.clone(),
+                container: transcoded_segment.container.clone(),
+                playlist_key: variant_playlist_key,
+                output_width: transcoded_segment.output_width as i32,
+                output_height: transcoded_segment.output_height as i32,
+                target_video_bitrate_kbps: transcoded_segment.target_video_bitrate_kbps as i32,
+                target_audio_bitrate_kbps: transcoded_segment.target_audio_bitrate_kbps as i32,
+                segment_count: latest_segment_states.len() as i32,
+            };
 
             self.repository
-                .mark_transcoding_succeeded_in_session(
+                .mark_rendition_ready_in_session(
                     &mut completion_session,
                     completion,
                     video_progress,
                 )
-                .await
+                .await?;
+
+            if self.policy.is_baseline_rendition(&job.rendition) {
+                let queued_jobs = self
+                    .repository
+                    .list_queued_additional_transcoding_jobs(job.video_id)
+                    .await?;
+                return Ok((
+                    queued_jobs
+                        .into_iter()
+                        .map(map_queued_job_to_message)
+                        .collect(),
+                    should_cleanup_source_segments,
+                ));
+            }
+
+            Ok((Vec::new(), should_cleanup_source_segments))
         }
         .await;
 
         match completion_result {
-            Ok(()) => {
+            Ok((follow_up_jobs, should_cleanup_source_segments)) => {
                 self.repository
                     .commit_video_completion_session(completion_session)
                     .await?;
+                if should_cleanup_source_segments {
+                    let prefix = format!("videos/{}/source/segments/", job.video_id);
+                    match self.object_storage.delete_upload_prefix(&prefix).await {
+                        Ok(deleted_count) => {
+                            tracing::info!(
+                                video_id = %job.video_id,
+                                deleted_object_count = deleted_count,
+                                prefix = %prefix,
+                                "deleted intermediate source segments after final transcoding completion"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                video_id = %job.video_id,
+                                prefix = %prefix,
+                                error = %error,
+                                "failed to delete intermediate source segments after final transcoding completion"
+                            );
+                        }
+                    }
+                }
+                Ok(follow_up_jobs)
             }
             Err(error) => {
                 self.repository
                     .rollback_video_completion_session(completion_session)
                     .await?;
-                return Err(error);
+                Err(error)
             }
         }
-
-        if self.policy.is_baseline_rendition(&job.rendition) {
-            let queued_jobs = self
-                .repository
-                .list_queued_additional_transcoding_jobs(job.video_id)
-                .await?;
-            return Ok(queued_jobs
-                .into_iter()
-                .map(map_queued_job_to_message)
-                .collect());
-        }
-
-        Ok(Vec::new())
     }
 
-    fn build_completion_update(
+    fn build_variant_playlist_segments(
         &self,
-        job: &ClaimedTranscodingJob,
-        packaged: &PackagedRendition,
-    ) -> TranscodingCompletionUpdate {
-        TranscodingCompletionUpdate {
-            transcoding_job_id: job.transcoding_job_id,
-            processing_job_id: job.processing_job_id,
-            video_id: job.video_id,
-            rendition_name: job.rendition.clone(),
-            codec: packaged.codec.clone(),
-            container: packaged.container.clone(),
-            playlist_key: format!(
-                "videos/{}/hls/{}/{}",
-                job.video_id, job.rendition, packaged.playlist_file_name
-            ),
-            output_width: packaged.output_width as i32,
-            output_height: packaged.output_height as i32,
-            target_video_bitrate_kbps: packaged.target_video_bitrate_kbps as i32,
-            target_audio_bitrate_kbps: packaged.target_audio_bitrate_kbps as i32,
-            segment_count: packaged.segment_count as i32,
-        }
+        video_id: uuid::Uuid,
+        rendition: &str,
+        latest_segment_states: &[LatestSegmentJobStateRecord],
+    ) -> AppResult<Vec<VariantPlaylistSegment>> {
+        latest_segment_states
+            .iter()
+            .map(|segment| {
+                let output_segment_s3_key = segment.output_segment_s3_key.as_deref().ok_or_else(|| {
+                    AppError::internal("completed segment is missing an output segment key")
+                })?;
+                Ok(VariantPlaylistSegment {
+                    duration_seconds: segment.source_segment_duration_seconds,
+                    segment_path: relative_segment_path(video_id, rendition, output_segment_s3_key)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn write_variant_playlist(
+        &self,
+        processing_directory: &PathBuf,
+        rendition: &str,
+        playlist_file_name: &str,
+        variant_playlist_segments: &[VariantPlaylistSegment],
+    ) -> AppResult<PathBuf> {
+        let playlist_path = processing_directory
+            .join("hls")
+            .join(rendition)
+            .join(playlist_file_name);
+        let manifest_body = render_variant_playlist(variant_playlist_segments);
+        tokio::fs::write(&playlist_path, manifest_body).await?;
+        Ok(playlist_path)
     }
 
     fn build_master_manifest_variants(
         &self,
         video_id: uuid::Uuid,
-        packaged: &PackagedRendition,
+        rendition: &str,
+        transcoded_segment: &TranscodedSegment,
         existing_ready_variants: Vec<ReadyManifestVariantRecord>,
+        playlist_key: &str,
     ) -> Vec<MasterManifestVariant> {
         let mut variants = existing_ready_variants
             .into_iter()
@@ -369,14 +512,15 @@ impl TranscoderRuntime {
             })
             .collect::<Vec<_>>();
 
-        variants.retain(|variant| variant.rendition != packaged.rendition);
+        variants.retain(|variant| variant.rendition != rendition);
         variants.push(MasterManifestVariant {
-            rendition: packaged.rendition.clone(),
-            playlist_path: format!("{}/{}", packaged.rendition, packaged.playlist_file_name),
-            width: packaged.output_width,
-            height: packaged.output_height,
-            video_bitrate_kbps: packaged.target_video_bitrate_kbps,
-            audio_bitrate_kbps: packaged.target_audio_bitrate_kbps,
+            rendition: rendition.to_owned(),
+            playlist_path: relative_playlist_path(video_id, playlist_key)
+                .unwrap_or_else(|| format!("{rendition}/{rendition}.m3u8")),
+            width: transcoded_segment.output_width,
+            height: transcoded_segment.output_height,
+            video_bitrate_kbps: transcoded_segment.target_video_bitrate_kbps,
+            audio_bitrate_kbps: transcoded_segment.target_audio_bitrate_kbps,
         });
         variants.sort_by_key(|variant| self.policy.rendition_ladder_position(&variant.rendition));
         variants
@@ -409,7 +553,7 @@ impl TranscoderRuntime {
         let completed_renditions = ready_manifest_variants
             .iter()
             .map(|variant| variant.rendition.as_str())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
         let all_planned_renditions_ready = planned_renditions
             .iter()
             .all(|rendition| completed_renditions.contains(rendition.as_str()));
@@ -465,6 +609,21 @@ fn relative_playlist_path(video_id: uuid::Uuid, playlist_key: &str) -> Option<St
     playlist_key.strip_prefix(&prefix).map(str::to_owned)
 }
 
+fn relative_segment_path(video_id: uuid::Uuid, rendition: &str, segment_key: &str) -> AppResult<String> {
+    let prefix = format!("videos/{video_id}/hls/{rendition}/");
+    segment_key
+        .strip_prefix(&prefix)
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::internal("segment key did not match the expected rendition prefix"))
+}
+
+fn all_segments_ready(latest_segment_states: &[LatestSegmentJobStateRecord]) -> bool {
+    !latest_segment_states.is_empty()
+        && latest_segment_states
+            .iter()
+            .all(|segment| segment.status == "SUCCEEDED")
+}
+
 fn map_transcoding_failure(
     job: &ClaimedTranscodingJob,
     disposition: TranscodingFailureDisposition,
@@ -477,12 +636,14 @@ fn map_transcoding_failure(
             transcoding_job_id: job.transcoding_job_id,
             video_id: job.video_id,
             rendition: job.rendition.clone(),
+            segment_index: job.segment_index,
             next_attempt,
             retry_job_message: TranscoderJobMessage {
                 transcoding_job_id: retry_transcoding_job_id,
                 processing_job_id: job.processing_job_id,
                 video_id: job.video_id,
                 rendition: job.rendition.clone(),
+                segment_index: job.segment_index,
                 correlation_id: job.correlation_id.clone(),
                 attempt: next_attempt,
             },
@@ -491,6 +652,7 @@ fn map_transcoding_failure(
             transcoding_job_id: job.transcoding_job_id,
             video_id: job.video_id,
             rendition: job.rendition.clone(),
+            segment_index: job.segment_index,
         },
     }
 }
@@ -501,7 +663,50 @@ fn map_queued_job_to_message(job: QueuedTranscodingJobRecord) -> TranscoderJobMe
         processing_job_id: job.processing_job_id,
         video_id: job.video_id,
         rendition: job.rendition,
+        segment_index: job.segment_index,
         correlation_id: job.correlation_id,
         attempt: job.attempt,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{all_segments_ready, LatestSegmentJobStateRecord};
+
+    #[test]
+    fn all_segments_ready_requires_every_latest_segment_to_succeed() {
+        let ready = all_segments_ready(&[
+            LatestSegmentJobStateRecord {
+                segment_index: 0,
+                status: "SUCCEEDED".to_owned(),
+                source_segment_duration_seconds: 4.0,
+                output_segment_s3_key: Some("a".to_owned()),
+            },
+            LatestSegmentJobStateRecord {
+                segment_index: 1,
+                status: "SUCCEEDED".to_owned(),
+                source_segment_duration_seconds: 4.0,
+                output_segment_s3_key: Some("b".to_owned()),
+            },
+        ]);
+
+        assert!(ready);
+
+        let not_ready = all_segments_ready(&[
+            LatestSegmentJobStateRecord {
+                segment_index: 0,
+                status: "SUCCEEDED".to_owned(),
+                source_segment_duration_seconds: 4.0,
+                output_segment_s3_key: Some("a".to_owned()),
+            },
+            LatestSegmentJobStateRecord {
+                segment_index: 1,
+                status: "RUNNING".to_owned(),
+                source_segment_duration_seconds: 4.0,
+                output_segment_s3_key: None,
+            },
+        ]);
+
+        assert!(!not_ready);
     }
 }

@@ -19,32 +19,31 @@ impl MediaProcessor {
         }
     }
 
-    pub async fn package_rendition_hls(
+    pub async fn transcode_segment(
         &self,
         source_path: &Path,
         output_root: &Path,
         profile: &RenditionProfile,
         source_width: u32,
         source_height: u32,
-    ) -> AppResult<PackagedRendition> {
+        segment_index: i32,
+    ) -> AppResult<TranscodedSegment> {
         let scaled_resolution =
             compute_scaled_resolution(source_width, source_height, profile.width, profile.height)?;
-        let rendition_directory = output_root.join(&profile.name);
+        let rendition_directory = output_root.join(&profile.name).join("segments");
         tokio::fs::create_dir_all(&rendition_directory).await?;
-        let variant_playlist_path = rendition_directory.join(&profile.variant_playlist_file_name);
-        let segment_pattern = rendition_directory.join("segment_%03d.ts");
+        let output_segment_file_name = format!("segment_{segment_index:05}.ts");
+        let output_segment_path = rendition_directory.join(&output_segment_file_name);
         let gop = profile
             .max_frame_rate
             .saturating_mul(profile.segment_duration_seconds);
 
         let ffmpeg_binary = self.ffmpeg_binary.clone();
         let source_path = source_path.to_path_buf();
-        let variant_playlist_path_for_command = variant_playlist_path.clone();
-        let segment_pattern_for_command = segment_pattern.clone();
+        let output_segment_path_for_command = output_segment_path.clone();
         let max_frame_rate = profile.max_frame_rate;
         let video_bitrate_kbps = profile.video_bitrate_kbps;
         let audio_bitrate_kbps = profile.audio_bitrate_kbps;
-        let segment_duration_seconds = profile.segment_duration_seconds;
         let scaled_width = scaled_resolution.width;
         let scaled_height = scaled_resolution.height;
         let ffmpeg_output = task::spawn_blocking(move || {
@@ -84,17 +83,9 @@ impl MediaProcessor {
                 .arg("48000")
                 .arg("-ac")
                 .arg("2")
-                .arg("-hls_time")
-                .arg(segment_duration_seconds.to_string())
-                // Emit a complete VOD package before we mark the video streamable.
-                // That keeps seeks/skips valid across the whole baseline timeline.
-                .arg("-hls_playlist_type")
-                .arg("vod")
-                .arg("-hls_segment_filename")
-                .arg(segment_pattern_for_command)
                 .arg("-f")
-                .arg("hls")
-                .arg(variant_playlist_path_for_command)
+                .arg("mpegts")
+                .arg(output_segment_path_for_command)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .output()
@@ -111,45 +102,23 @@ impl MediaProcessor {
             ));
         }
 
-        let segment_count = count_segment_files(&rendition_directory).await?;
-        if segment_count == 0 {
+        if tokio::fs::metadata(&output_segment_path).await.is_err() {
             return Err(AppError::internal(
-                "ffmpeg completed without producing HLS segments",
+                "ffmpeg completed without producing a transcoded segment",
             ));
         }
 
-        Ok(PackagedRendition {
+        Ok(TranscodedSegment {
             rendition: profile.name.clone(),
             codec: profile.video_codec.clone(),
             container: profile.segment_container.clone(),
-            playlist_file_name: profile.variant_playlist_file_name.clone(),
+            output_segment_file_name,
             output_width: scaled_resolution.width,
             output_height: scaled_resolution.height,
             target_video_bitrate_kbps: profile.video_bitrate_kbps,
             target_audio_bitrate_kbps: profile.audio_bitrate_kbps,
-            segment_count,
         })
     }
-}
-
-async fn count_segment_files(rendition_directory: &Path) -> AppResult<usize> {
-    let mut entries = tokio::fs::read_dir(rendition_directory).await?;
-    let mut segment_count = 0usize;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let is_segment = entry
-            .path()
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.eq_ignore_ascii_case("ts"))
-            .unwrap_or(false);
-
-        if is_segment {
-            segment_count += 1;
-        }
-    }
-
-    Ok(segment_count)
 }
 
 pub fn compute_scaled_resolution(
@@ -196,16 +165,15 @@ pub struct ScaledResolution {
 }
 
 #[derive(Debug, Clone)]
-pub struct PackagedRendition {
+pub struct TranscodedSegment {
     pub rendition: String,
     pub codec: String,
     pub container: String,
-    pub playlist_file_name: String,
+    pub output_segment_file_name: String,
     pub output_width: u32,
     pub output_height: u32,
     pub target_video_bitrate_kbps: u32,
     pub target_audio_bitrate_kbps: u32,
-    pub segment_count: usize,
 }
 
 #[cfg(test)]

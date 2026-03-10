@@ -6,6 +6,7 @@ use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -24,6 +25,7 @@ pub struct ObjectStorage {
 
 const PROCESSED_ARTIFACT_UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 const PROCESSED_ARTIFACT_UPLOAD_ATTEMPTS: u32 = 3;
+const DELETE_PREFIX_TIMEOUT: Duration = Duration::from_secs(90);
 
 impl ObjectStorage {
     pub async fn new(config: &TranscoderConfig) -> AppResult<Self> {
@@ -278,6 +280,25 @@ impl ObjectStorage {
             }),
         ))
     }
+
+    pub async fn delete_upload_prefix(&self, prefix: &str) -> AppResult<u64> {
+        match self.delete_prefix_with_sdk(&self.upload_bucket, prefix).await {
+            Ok(deleted_count) => Ok(deleted_count),
+            Err(error) => {
+                if self
+                    .try_delete_prefix_with_aws_cli(&self.upload_bucket, prefix, Some(error.as_str()))
+                    .await?
+                {
+                    return Ok(0);
+                }
+
+                Err(AppError::internal_with_context(
+                    "failed to delete upload-bucket prefix",
+                    format!("bucket={} prefix={} error={error}", self.upload_bucket, prefix),
+                ))
+            }
+        }
+    }
 }
 
 impl ObjectStorage {
@@ -366,6 +387,135 @@ impl ObjectStorage {
             error = %stderr.trim(),
             "aws cli upload fallback failed"
         );
+
+        Ok(false)
+    }
+
+    async fn delete_prefix_with_sdk(&self, bucket: &str, prefix: &str) -> Result<u64, String> {
+        let mut deleted_object_count = 0u64;
+        let mut continuation_token = None;
+
+        loop {
+            let response = self
+                .client
+                .list_objects_v2()
+                .bucket(bucket)
+                .prefix(prefix)
+                .set_continuation_token(continuation_token.clone())
+                .send()
+                .await
+                .map_err(|error| format!("list_objects_v2 failed: {error}"))?;
+
+            let object_identifiers = response
+                .contents()
+                .iter()
+                .filter_map(|object| object.key())
+                .map(|key| {
+                    ObjectIdentifier::builder()
+                        .key(key)
+                        .build()
+                        .map_err(|error| format!("failed to build delete object identifier: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if !object_identifiers.is_empty() {
+                let delete_response = self
+                    .client
+                    .delete_objects()
+                    .bucket(bucket)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(object_identifiers.clone()))
+                            .build()
+                            .map_err(|error| format!("failed to build delete request: {error}"))?,
+                    )
+                    .send()
+                    .await
+                    .map_err(|error| format!("delete_objects failed: {error}"))?;
+
+                if !delete_response.errors().is_empty() {
+                    let failed_keys = delete_response
+                        .errors()
+                        .iter()
+                        .filter_map(|error| error.key())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!("delete_objects reported failed keys: {failed_keys}"));
+                }
+
+                deleted_object_count += delete_response.deleted().len() as u64;
+            }
+
+            if !response.is_truncated().unwrap_or(false) {
+                break;
+            }
+
+            continuation_token = response.next_continuation_token().map(str::to_owned);
+
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(deleted_object_count)
+    }
+
+    async fn try_delete_prefix_with_aws_cli(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        sdk_error: Option<&str>,
+    ) -> AppResult<bool> {
+        if !self.enable_aws_cli_s3_fallback {
+            return Ok(false);
+        }
+
+        let s3_uri = format!("s3://{bucket}/{}", prefix.trim_start_matches('/'));
+        let mut command = Command::new("aws");
+        command.args([
+            "s3",
+            "rm",
+            s3_uri.as_str(),
+            "--recursive",
+            "--region",
+            self.aws_region.as_str(),
+            "--only-show-errors",
+        ]);
+
+        tracing::warn!(
+            bucket,
+            prefix,
+            sdk_error = sdk_error.unwrap_or("unknown"),
+            "falling back to aws cli for prefix deletion"
+        );
+
+        let output = tokio::time::timeout(DELETE_PREFIX_TIMEOUT, command.output())
+            .await
+            .map_err(|_| {
+                AppError::internal_with_context(
+                    "aws cli delete fallback timed out",
+                    format!(
+                        "bucket={} prefix={} timeout_seconds={}",
+                        bucket,
+                        prefix,
+                        DELETE_PREFIX_TIMEOUT.as_secs()
+                    ),
+                )
+            })?
+            .map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to spawn aws cli delete fallback",
+                    format!("bucket={} prefix={} error={error}", bucket, prefix),
+                )
+            })?;
+
+        if output.status.success() {
+            tracing::info!(bucket, prefix, "deleted upload prefix with aws cli fallback");
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(bucket, prefix, error = %stderr.trim(), "aws cli delete fallback failed");
 
         Ok(false)
     }

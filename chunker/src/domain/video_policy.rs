@@ -32,6 +32,10 @@ impl VideoPolicy {
         self.baseline_rendition_profile.name.clone()
     }
 
+    pub fn source_segment_duration_seconds(&self) -> u32 {
+        self.baseline_rendition_profile.segment_duration_seconds
+    }
+
     pub fn source_eligible_additional_renditions(
         &self,
         source_width: u32,
@@ -66,6 +70,7 @@ fn rendition_fits_source(
 #[serde(rename_all = "camelCase")]
 pub struct BaselineRenditionProfile {
     pub name: String,
+    pub segment_duration_seconds: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -85,6 +90,7 @@ mod tests {
         let policy = VideoPolicy {
             baseline_rendition_profile: BaselineRenditionProfile {
                 name: "360p".to_owned(),
+                segment_duration_seconds: 4,
             },
             adaptive_rendition_ladder: vec![
                 AdaptiveRenditionProfile {

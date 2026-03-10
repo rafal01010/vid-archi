@@ -26,6 +26,7 @@ pub struct ChunkerConfig {
     pub sqs_visibility_timeout_seconds: i32,
     pub max_processing_attempts: i32,
     pub chunker_temp_dir: PathBuf,
+    pub ffmpeg_binary: String,
     pub ffprobe_binary: String,
 }
 
@@ -80,6 +81,7 @@ impl ChunkerConfig {
         let chunker_temp_dir = env::var("CHUNKER_TEMP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp/vid-archi-chunker"));
+        let ffmpeg_binary = env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_owned());
         let ffprobe_binary = env::var("FFPROBE_BIN").unwrap_or_else(|_| "ffprobe".to_owned());
 
         Ok(Self {
@@ -104,6 +106,7 @@ impl ChunkerConfig {
             sqs_visibility_timeout_seconds,
             max_processing_attempts,
             chunker_temp_dir,
+            ffmpeg_binary,
             ffprobe_binary,
         })
     }

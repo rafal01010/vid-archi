@@ -80,20 +80,15 @@ impl VideoRepository {
                 is_streamable,
                 created_at,
                 updated_at,
-                (
-                    SELECT tj.finished_at
-                    FROM transcoding_jobs tj
-                    WHERE tj.video_id = videos.id
-                      AND tj.rendition = '360p'::video_rendition_name
-                      AND tj.status = 'SUCCEEDED'::transcoding_job_status
-                    ORDER BY tj.attempt DESC, tj.finished_at DESC
-                    LIMIT 1
-                ) AS baseline_ready_at,
-                (
-                    SELECT MAX(tj.finished_at)
-                    FROM transcoding_jobs tj
-                    WHERE tj.video_id = videos.id
-                      AND tj.status = 'SUCCEEDED'::transcoding_job_status
+                baseline_ready_at,
+                COALESCE(
+                    ready_at,
+                    (
+                        SELECT MAX(tj.finished_at)
+                        FROM transcoding_jobs tj
+                        WHERE tj.video_id = videos.id
+                          AND tj.status = 'SUCCEEDED'::transcoding_job_status
+                    )
                 ) AS processing_completed_at,
                 manifest_s3_key,
                 error_code,

@@ -20,7 +20,7 @@ use crate::infrastructure::message_queue::{
 };
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::ChunkerRepository;
-use crate::media::SourceProbe;
+use crate::media::{SourceProbe, SourceSegmenter};
 use crate::observability::init_tracing;
 
 #[tokio::main]
@@ -37,7 +37,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let chunker_queue_publisher = ChunkerQueuePublisher::new(&config).await?;
     let transcoder_queue_publisher = TranscoderQueuePublisher::new(&config).await?;
     let source_probe = SourceProbe::new(&config);
-    let runtime = ChunkerRuntime::new(config, policy, repository, object_storage, source_probe);
+    let source_segmenter = SourceSegmenter::new(&config);
+    let runtime = ChunkerRuntime::new(
+        config,
+        policy,
+        repository,
+        object_storage,
+        source_probe,
+        source_segmenter,
+    );
 
     loop {
         let Some(message) = queue_consumer.receive().await? else {
@@ -57,13 +65,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(ChunkerProcessOutcome::Dispatched {
                 job_id,
                 video_id,
-                transcoder_message,
+                transcoder_messages,
             }) => {
-                transcoder_queue_publisher
-                    .enqueue(transcoder_message)
-                    .await?;
+                for transcoder_message in transcoder_messages {
+                    transcoder_queue_publisher
+                        .enqueue(transcoder_message)
+                        .await?;
+                }
                 queue_consumer.delete(&message.receipt_handle).await?;
-                tracing::info!(%job_id, %video_id, "chunker dispatched baseline transcoder job");
+                tracing::info!(%job_id, %video_id, "chunker dispatched baseline transcoder jobs");
             }
             Ok(ChunkerProcessOutcome::RetryQueued {
                 job_id,

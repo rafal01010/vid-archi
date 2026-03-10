@@ -80,14 +80,15 @@ scripts/           deploy/run helpers
 
 The backend does not run media processing. It hands work off to the processing side through database state:
 - `processing_jobs` is the parent job table claimed by `chunker`
-- `transcoding_jobs` is the per-rendition table claimed by `transcoder`
+- `transcoding_jobs` stores one row per rendition segment claimed by `transcoder`
 
 Current baseline path:
 1. backend inserts a `BASELINE` `processing_jobs` row
-2. `chunker` claims it and persists source dimensions
-3. `chunker` inserts a `360p` child row into `transcoding_jobs`
-4. `transcoder-360p` produces the baseline HLS package
-5. share-page reads playback metadata only after `BASELINE_READY`
+2. `chunker` claims it, persists source dimensions, and splits the source into reusable segments
+3. `chunker` inserts one `360p` segment job per source segment into `transcoding_jobs`
+4. `transcoder-360p` workers process those segment jobs independently and out of order if needed
+5. the final baseline segment completion assembles the `360p` playlist and marks the video `BASELINE_READY`
+6. share-page reads playback metadata only after `BASELINE_READY`
 
 ## Local Run
 

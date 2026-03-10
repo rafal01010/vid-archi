@@ -2,11 +2,6 @@
 
 All API responses are JSON. Clients may send `x-correlation-id`; the API will echo it back and use it for downstream processing logs.
 
-Refer to:
-- [SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md](/Users/dave/LabBase/vid-archi/references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md)
-- [youtube_system_design_reference.md](/Users/dave/LabBase/vid-archi/references/youtube_system_design_reference.md)
-- [Youtube-problem-writeup.md](/Users/dave/LabBase/vid-archi/references/Youtube-problem-writeup.md)
-
 ## Health
 
 `GET /healthz`

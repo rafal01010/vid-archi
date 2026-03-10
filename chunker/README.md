@@ -7,13 +7,16 @@ Responsibilities:
 - move videos from `UPLOADED` to `PROCESSING_BASELINE`
 - download the source object from the upload bucket
 - probe source dimensions with `ffprobe`
+- split the uploaded source into reusable source segments
+- upload those source segments back into the upload bucket
 - persist `source_width` and `source_height`
-- enqueue per-rendition rows in `transcoding_jobs`
-- publish the baseline transcoder message to the transcoder SQS queue
+- enqueue per-segment, per-rendition rows in `transcoding_jobs`
+- publish the baseline segment jobs to the transcoder SQS queues
 
 Current implemented behavior:
-- the chunker dispatches the baseline `360p` transcoding job first
-- it also queues an `ADDITIONAL_RENDITIONS` parent job plus any source-eligible higher renditions in Postgres so baseline completion can release them onto SQS later
+- the chunker splits the uploaded source into segment files before it dispatches transcoding work
+- it publishes all baseline `360p` segment jobs first
+- it also queues an `ADDITIONAL_RENDITIONS` parent job plus any source-eligible higher-rendition segment jobs in Postgres so baseline completion can release them onto SQS later
 
 Logging behavior:
 - logs are emitted as structured JSON

@@ -6,19 +6,7 @@ This document is a build blueprint for implementing the take-home exam project: 
 
 It is written to be usable by both a human implementer and coding LLMs.
 
-## 2) Source Of Truth And How To Use References
-
-Primary exam requirements:
-- `references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md`
-
-Supporting architecture references:
-- `references/youtube_system_design_reference.md`
-- `references/Youtube-problem-writeup.md`
-
-How to apply references:
-- Treat `SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md` as authoritative for scope and constraints.
-- Use `youtube_system_design_reference.md` for implementation primitives (multipart upload, manifest, segmenting, ABR, status gating).
-- Use `Youtube-problem-writeup.md` for deeper reasoning on tradeoffs (segmented storage, pipeline orchestration, scaling reads, CDN usage).
+## 2) Working Rules
 
 Shell-script rule:
 - When a service becomes runnable or deployable, add companion `.sh` scripts for:
@@ -296,18 +284,6 @@ Fields:
 - `expires_at`
 - `status` (`OPEN|COMPLETED|ABORTED|EXPIRED`)
 - `created_at`, `updated_at`
-
-### 7.3 `upload_parts`
-
-Fields:
-- `session_id` (FK)
-- `part_number`
-- `etag`
-- `size_bytes`
-- `uploaded_at`
-
-Index/constraints:
-- unique(`session_id`, `part_number`)
 
 ### 7.4 `video_renditions`
 
@@ -765,11 +741,6 @@ Create under `/docs`:
 - `operational-costs.md`
   - cost centers and chosen mitigations
 
-Include "Refer to" citations in docs:
-- `references/SYSTEM_DESIGN_PROJECT_REQUIREMENTS_GUIDELINES.md` for mandatory constraints.
-- `references/youtube_system_design_reference.md` for chunk/manifest/ABR primitives.
-- `references/Youtube-problem-writeup.md` for scaling and pipeline deep dive rationale.
-
 ## 19) Suggested 1-Week Execution Cadence
 
 Day 0:
@@ -987,7 +958,7 @@ Destructive DB reset commands:
 - STG app host:
   - `./scripts/stg/deploy-stg-app-host.sh --reset-db`
 
-- [x] 2. Implement DB schema + migrations for `videos`, `upload_sessions`, `upload_parts`, `video_renditions`, `processing_jobs`.
+- [x] 2. Implement DB schema + migrations for `videos`, `upload_sessions`, `video_renditions`, `processing_jobs`.
 
 - [x] 3a. Implement `POST /api/videos` (create video + upload session + S3 multipart init).
 - [x] 3b. Implement part-signing endpoint and complete-upload endpoint.
@@ -1118,17 +1089,15 @@ Schedule note:
 - [x] 11a. Write `docs/architecture.md` with component and sequence diagrams.
 - [x] 11b. Write `docs/api.md` and include request/response examples.
 - [x] 11c. Write `docs/operational-costs.md` with S3/CDN/lifecycle decisions and tradeoffs.
-- [x] 11d. Add explicit citations to files under `references/` for requirement traceability.
 - [x] 11e. Document STG deployment topology, resource list, and monthly cost guardrails.
 - [x] 11f. Add ADR/note: API Gateway omitted in current STG for cost; include benefits and upgrade path to production-like ingress.
 
-Implementation note for `11a/11b/11c/11d/11e/11f`:
+Implementation note for `11a/11b/11c/11e/11f`:
 - `docs/architecture.md` now includes a component diagram, an upload-to-first-play sequence diagram, the delete-by-code cleanup path, the structured logging model, the current STG topology, and the ingress note for the current ALB-only path.
 - `docs/api.md` now documents the implemented endpoints with concise request/response examples, including the `x-correlation-id` behavior and the delete-video contract.
 - `docs/operational-costs.md` now captures the current STG footprint, cost-control decisions, and monthly guardrails.
 - `docs/stg-deployment.md` now consolidates the first-time STG deployment steps, ALB listener/target-group setup, environment templates, and redeploy commands for the current app-host plus worker-host layout.
 - Root and service READMEs were rewritten in a production-style tone so the repository reads like an operating application rather than an internal exercise bundle.
-- `docs/architecture.md` and `docs/api.md` now both include explicit "Refer to" links back to the requirement and system-design references under `references/`.
 
 - [ ] 12a. Run final end-to-end demo scenario and capture expected outputs.
 - [ ] 12b. Verify the requirement checklist in Section 3 item-by-item.

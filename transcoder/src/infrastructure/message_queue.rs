@@ -14,6 +14,7 @@ pub struct TranscoderJobMessage {
     pub processing_job_id: Uuid,
     pub video_id: Uuid,
     pub rendition: String,
+    pub segment_index: i32,
     pub correlation_id: String,
     pub attempt: i32,
 }
