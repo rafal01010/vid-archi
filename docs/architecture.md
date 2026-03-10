@@ -27,6 +27,7 @@ flowchart LR
     ChunkerQueue --> Chunker
     Chunker --> DB
     Chunker --> Upload
+    Chunker --> Processed
     Chunker --> TranscoderQueue
     TranscoderQueue --> Transcoder
     Transcoder --> DB
@@ -65,16 +66,16 @@ sequenceDiagram
     Qc->>C: deliver baseline job
     C->>D: claim BASELINE job
     C->>S: download source
-    C->>S: upload source segments
-    C->>D: persist source dimensions + insert per-segment rendition job rows
-    C->>Qt: send baseline 360p segment jobs
-    Qt->>T: deliver one 360p segment job
-    T->>D: claim one 360p segment job
-    T->>S: download one source segment
-    T->>P: upload one processed 360p segment
-    T->>D: mark segment complete and assemble playlist if last segment
+    C->>S: upload highest-quality intermediate HLS
+    C->>P: publish the same highest quality if it is not the baseline
+    C->>D: persist source dimensions + insert baseline/lower rendition jobs
+    C->>Qt: send baseline rendition job
+    Qt->>T: deliver one baseline job
+    T->>D: claim baseline rendition job
+    T->>S: download intermediate playlist + segments
+    T->>P: upload processed baseline HLS
     T->>D: mark BASELINE_READY
-    T->>Qt: send higher-rendition segment jobs
+    T->>Qt: send remaining lower-rendition jobs
     U->>A: GET /api/videos/{publicId}/playback
     A-->>U: manifestUrl + available qualities
     U->>A: DELETE /api/videos/{publicId} + deleteCode
@@ -103,29 +104,25 @@ When the browser calls `POST /api/videos/{videoId}/complete`, the backend comple
 
 This is the handoff point between the request path and the background processing path.
 
-### 4. Chunker prepares the source for playback
+### 4. Chunker prepares the intermediate source
 
-The chunker receives the queue message and claims the matching job in Postgres before doing work. That claim step is what makes duplicate queue deliveries safe: if the job has already been claimed or finished, the extra message becomes harmless.
+The chunker receives the queue message and claims the matching baseline job in Postgres before doing work. Once claimed, it downloads the uploaded source file, probes the real dimensions, and generates one continuous HLS rendition at the highest quality the source can support.
 
-Once claimed, the chunker downloads the source object from the upload bucket, probes it with `ffprobe`, stores the source dimensions on the video record, splits the original file into reusable source segments, uploads those segments back into object storage, and creates one transcoding job per segment for the baseline rendition plus any higher renditions that are valid for the source resolution. It publishes only the baseline `360p` segment jobs first so the system reaches first playback as quickly as possible.
+That highest-quality HLS output serves two purposes. First, it becomes the intermediate source stored in the upload bucket for the lower transcoders to reuse. Second, if that quality is above the baseline rendition, the chunker also seeds it into the processed bucket so the system does not waste time transcoding the top quality twice.
 
-During this phase the video is in `PROCESSING_BASELINE`.
+During the same transaction window, the chunker stores the source dimensions on the `videos` row and creates the `transcoding_jobs` rows the lower workers will use next.
 
 ### 5. Transcoder produces the first playable rendition
 
-The transcoder receives baseline segment jobs, claims the corresponding `transcoding_jobs` row in Postgres, downloads only the claimed source segment, and runs `ffmpeg` to produce the processed segment for its configured rendition. Segment jobs can finish out of order.
+The baseline transcoder claims the `360p` job, downloads the intermediate playlist and segments from the upload bucket, and runs `ffmpeg` against that intermediate HLS input to produce the final baseline HLS output in the processed bucket.
 
-After a segment upload succeeds, the transcoder opens a locked completion transaction for that video in Postgres and asks for the latest job state for every segment in that rendition. If any segment is still `QUEUED`, `RUNNING`, or has only failed attempts so far, the rendition is not complete yet and the worker stops there. If every segment's latest state is `SUCCEEDED`, that worker assembles the final variant playlist in segment order, refreshes `master.m3u8`, and marks the rendition ready. That is how the system avoids race conditions when multiple segment workers finish close together.
-
-When the full baseline rendition has been assembled, the transcoder marks the `360p` row in `video_renditions` as ready and updates the `videos` row to `BASELINE_READY`. At that point `is_streamable` becomes true and the `manifest_s3_key` is available for playback responses.
-
-This is the first moment the video is considered streamable.
+After the baseline rendition is uploaded, the transcoder updates `video_renditions`, refreshes `master.m3u8`, and moves the video to `BASELINE_READY`. That is the first point where the API can mark the video as streamable and return playback URLs.
 
 ### 6. Playback and background quality upgrades
 
-Once the video reaches `BASELINE_READY`, `GET /api/videos/{publicId}/playback` can return the manifest URL and the browser can start playback through CloudFront. The player can begin with the baseline stream while higher renditions are still being processed.
+Once the video reaches `BASELINE_READY`, `GET /api/videos/{publicId}/playback` returns the manifest URL and the browser starts playback through CloudFront. The player can begin at the baseline quality immediately.
 
-After baseline playback is available, the transcoder releases the queued higher-rendition jobs. Those continue in the background, move the video through `PROCESSING_FULL`, and add more entries to `video_renditions` as each quality finishes. When all intended renditions are done, the video can move to `READY`, and the intermediate source-segment objects are deleted from the upload bucket. The original uploaded source file is kept.
+After that handoff, the remaining lower-quality transcoders consume the same intermediate playlist from the upload bucket and publish their final renditions to the processed bucket. When all planned qualities are ready, the video moves to `READY` and the temporary intermediate HLS objects are deleted from the upload bucket. The original uploaded source file is kept.
 
 ## Runtime Responsibilities
 
@@ -137,16 +134,18 @@ After baseline playback is available, the transcoder releases the queued higher-
   - consumes the chunker SQS queue
   - claims parent baseline jobs in Postgres for idempotency
   - probes the source file with `ffprobe`
-  - splits the source into reusable upload-bucket segments
-  - creates per-segment baseline and higher-rendition jobs in Postgres
-  - publishes the baseline segment jobs to the transcoder SQS queues
+  - builds one highest-eligible intermediate HLS rendition from the uploaded source
+  - stores that intermediate rendition in the upload bucket
+  - publishes the same top quality directly to the processed bucket when it avoids redundant work
+  - creates the baseline and lower-rendition transcoding jobs in Postgres
+  - publishes the baseline job to the transcoder SQS queues
 - `transcoder`
   - consumes the transcoder SQS queue
   - runs one configured rendition per process
-  - transcodes one source segment at a time with `ffmpeg`
-  - assembles the final rendition playlist after the last segment for that rendition finishes
+  - downloads the intermediate HLS input from the upload bucket
+  - transcodes one full rendition from that intermediate input with `ffmpeg`
   - refreshes `master.m3u8` as renditions become ready
-  - deletes the intermediate source-segment prefix after the video reaches `READY`
+  - deletes the intermediate source prefix after the video reaches `READY`
   - updates Postgres as the durable source of truth for playback readiness
 
 ## Scaling And Consistency
@@ -156,7 +155,7 @@ After baseline playback is available, the transcoder releases the queued higher-
 - Chunkers scale on chunker-queue depth.
 - Transcoders scale on transcoder-queue depth.
 - Standard SQS delivery is tolerated because Postgres still gates all job claims and status transitions, so duplicate queue deliveries only produce stale messages, not duplicate completed work.
-- Rendition completion is decided under a locked Postgres transaction by checking the latest state of every segment for that rendition, so out-of-order segment finishes do not corrupt playlist assembly.
+- The intermediate HLS stage keeps lower transcoders from repeatedly downloading the original upload and avoids rebuilding the top quality twice.
 - `BASELINE_READY` is the first playback milestone. Higher renditions continue in the background under `PROCESSING_FULL`.
 
 ## Anonymous Delete Flow

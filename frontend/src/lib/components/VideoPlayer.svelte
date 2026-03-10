@@ -5,14 +5,16 @@
 	export let manifestUrl = null;
 	export let qualityOptions = [];
 	export let defaultQuality = 'auto';
+	export let selectedQuality = 'auto';
 
 	let videoElement;
 	let hlsInstance = null;
 	let playbackError = '';
 	let currentAttachmentKey = '';
-	let selectedQuality = defaultQuality;
-
 	$: qualityChoices = buildQualityChoices(manifestUrl, qualityOptions);
+	$: if (!selectedQuality) {
+		selectedQuality = defaultQuality || 'auto';
+	}
 	$: if (!qualityChoices.some((choice) => choice.value === selectedQuality)) {
 		selectedQuality = qualityChoices[0]?.value ?? 'auto';
 	}

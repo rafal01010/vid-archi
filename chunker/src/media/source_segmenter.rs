@@ -25,9 +25,17 @@ impl SourceSegmenter {
         &self,
         source_path: &Path,
         output_directory: &Path,
+        source_width: u32,
+        source_height: u32,
         rendition: &AdaptiveRenditionProfile,
         segment_duration_seconds: u32,
     ) -> AppResult<PreparedIntermediateRendition> {
+        let scaled_resolution = compute_scaled_resolution(
+            source_width,
+            source_height,
+            rendition.width,
+            rendition.height,
+        )?;
         let rendition_directory = output_directory.join(&rendition.name);
         tokio::fs::create_dir_all(&rendition_directory).await?;
 
@@ -38,7 +46,9 @@ impl SourceSegmenter {
                 source_path,
                 &variant_playlist_path,
                 &segment_pattern,
-                rendition,
+                &scaled_resolution,
+                rendition.video_bitrate_kbps,
+                rendition.audio_bitrate_kbps,
                 segment_duration_seconds,
             )
             .await?;
@@ -77,8 +87,8 @@ impl SourceSegmenter {
 
         Ok(PreparedIntermediateRendition {
             rendition_name: rendition.name.clone(),
-            width: rendition.width,
-            height: rendition.height,
+            width: scaled_resolution.width,
+            height: scaled_resolution.height,
             video_bitrate_kbps: rendition.video_bitrate_kbps,
             audio_bitrate_kbps: rendition.audio_bitrate_kbps,
             variant_playlist_path,
@@ -91,17 +101,17 @@ impl SourceSegmenter {
         source_path: &Path,
         variant_playlist_path: &Path,
         segment_pattern: &Path,
-        rendition: &AdaptiveRenditionProfile,
+        scaled_resolution: &ScaledResolution,
+        video_bitrate_kbps: u32,
+        audio_bitrate_kbps: u32,
         segment_duration_seconds: u32,
     ) -> AppResult<std::process::Output> {
         let ffmpeg_binary = self.ffmpeg_binary.clone();
         let source_path_for_command = source_path.to_path_buf();
         let variant_playlist_path_for_command = variant_playlist_path.to_path_buf();
         let segment_pattern_for_command = segment_pattern.to_path_buf();
-        let rendition_width = rendition.width;
-        let rendition_height = rendition.height;
-        let video_bitrate_kbps = rendition.video_bitrate_kbps;
-        let audio_bitrate_kbps = rendition.audio_bitrate_kbps;
+        let scaled_width = scaled_resolution.width;
+        let scaled_height = scaled_resolution.height;
 
         task::spawn_blocking(move || {
             std::process::Command::new(ffmpeg_binary)
@@ -109,10 +119,7 @@ impl SourceSegmenter {
                 .arg("-i")
                 .arg(source_path_for_command)
                 .arg("-vf")
-                .arg(format!(
-                    "scale=w={}:h={}:force_original_aspect_ratio=decrease",
-                    rendition_width, rendition_height
-                ))
+                .arg(format!("scale={scaled_width}:{scaled_height}"))
                 .arg("-c:v")
                 .arg("libx264")
                 .arg("-preset")
@@ -250,4 +257,68 @@ pub struct PreparedIntermediateSegment {
     pub segment_index: i32,
     pub path: PathBuf,
     pub duration_seconds: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ScaledResolution {
+    width: u32,
+    height: u32,
+}
+
+fn compute_scaled_resolution(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> AppResult<ScaledResolution> {
+    if source_width == 0 || source_height == 0 {
+        return Err(AppError::internal("source dimensions must be positive"));
+    }
+
+    let scale = f64::min(
+        f64::min(
+            target_width as f64 / source_width as f64,
+            target_height as f64 / source_height as f64,
+        ),
+        1.0,
+    );
+
+    let scaled_width = normalize_even_dimension((source_width as f64 * scale).floor() as u32);
+    let scaled_height = normalize_even_dimension((source_height as f64 * scale).floor() as u32);
+
+    Ok(ScaledResolution {
+        width: scaled_width,
+        height: scaled_height,
+    })
+}
+
+fn normalize_even_dimension(value: u32) -> u32 {
+    let clamped = value.max(2);
+
+    if clamped % 2 == 0 {
+        clamped
+    } else {
+        clamped.saturating_sub(1).max(2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_scaled_resolution;
+
+    #[test]
+    fn compute_scaled_resolution_preserves_portrait_orientation_with_even_dimensions() {
+        let scaled = compute_scaled_resolution(2160, 3840, 3840, 2160).expect("scaled resolution");
+
+        assert_eq!(scaled.width, 1214);
+        assert_eq!(scaled.height, 2160);
+    }
+
+    #[test]
+    fn compute_scaled_resolution_keeps_landscape_targets_even() {
+        let scaled = compute_scaled_resolution(3840, 2160, 1920, 1080).expect("scaled resolution");
+
+        assert_eq!(scaled.width, 1920);
+        assert_eq!(scaled.height, 1080);
+    }
 }

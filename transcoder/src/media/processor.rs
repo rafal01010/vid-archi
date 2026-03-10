@@ -166,7 +166,7 @@ impl MediaProcessor {
         let audio_bitrate_kbps = profile.audio_bitrate_kbps;
         let segment_duration_seconds = profile.segment_duration_seconds;
         let scale_filter = format!(
-            "scale=w={}:h={}:force_original_aspect_ratio=decrease",
+            "scale={}:{}",
             scaled_resolution.width, scaled_resolution.height
         );
         let ffmpeg_output = task::spawn_blocking(move || {

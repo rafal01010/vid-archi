@@ -199,6 +199,8 @@ impl ChunkerRuntime {
             .build_intermediate_rendition(
                 &source_path,
                 &processing_directory.join("intermediate"),
+                source_metadata.width,
+                source_metadata.height,
                 &highest_rendition,
                 self.policy.source_segment_duration_seconds(),
             )

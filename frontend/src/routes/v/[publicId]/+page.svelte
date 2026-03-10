@@ -13,6 +13,7 @@
 	let pageState = 'loading';
 	let errorMessage = '';
 	let refreshTimer = null;
+	let selectedQuality = 'auto';
 
 	onMount(() => {
 		void loadPlayback();
@@ -195,6 +196,7 @@
 						manifestUrl={playback.manifestUrl}
 						qualityOptions={playback.availableQualities}
 						defaultQuality={playback.defaultQuality}
+						bind:selectedQuality
 					/>
 				</div>
 			{:else}
