@@ -132,8 +132,6 @@ impl SourceSegmenter {
         task::spawn_blocking(move || {
             std::process::Command::new(ffmpeg_binary)
                 .arg("-y")
-                .arg("-display_rotation:v:0")
-                .arg("0")
                 .arg("-noautorotate")
                 .arg("-i")
                 .arg(source_path_for_command)

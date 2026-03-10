@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
+use serde::Deserialize;
 use tokio::task;
 
 use crate::domain::video_policy::RenditionProfile;
@@ -10,12 +11,14 @@ use crate::infrastructure::config::TranscoderConfig;
 #[derive(Clone)]
 pub struct MediaProcessor {
     ffmpeg_binary: String,
+    ffprobe_binary: String,
 }
 
 impl MediaProcessor {
     pub fn new(config: &TranscoderConfig) -> Self {
         Self {
             ffmpeg_binary: config.ffmpeg_binary.clone(),
+            ffprobe_binary: config.ffprobe_binary.clone(),
         }
     }
 
@@ -30,6 +33,12 @@ impl MediaProcessor {
     ) -> AppResult<TranscodedSegment> {
         let scaled_resolution =
             compute_scaled_resolution(source_width, source_height, profile.width, profile.height)?;
+        let source_rotation_degrees = self.probe_source_rotation_degrees(source_path).await?;
+        let video_filter = build_video_filter(
+            source_rotation_degrees,
+            scaled_resolution.width,
+            scaled_resolution.height,
+        );
         let rendition_directory = output_root.join(&profile.name).join("segments");
         tokio::fs::create_dir_all(&rendition_directory).await?;
         let output_segment_file_name = format!("segment_{segment_index:05}.ts");
@@ -44,15 +53,15 @@ impl MediaProcessor {
         let max_frame_rate = profile.max_frame_rate;
         let video_bitrate_kbps = profile.video_bitrate_kbps;
         let audio_bitrate_kbps = profile.audio_bitrate_kbps;
-        let scaled_width = scaled_resolution.width;
-        let scaled_height = scaled_resolution.height;
+        let video_filter_for_command = video_filter.clone();
         let ffmpeg_output = task::spawn_blocking(move || {
             std::process::Command::new(ffmpeg_binary)
                 .arg("-y")
+                .arg("-noautorotate")
                 .arg("-i")
                 .arg(source_path)
                 .arg("-vf")
-                .arg(format!("scale={scaled_width}:{scaled_height}"))
+                .arg(video_filter_for_command)
                 .arg("-c:v")
                 .arg("libx264")
                 .arg("-preset")
@@ -125,6 +134,96 @@ impl MediaProcessor {
             target_audio_bitrate_kbps: profile.audio_bitrate_kbps,
         })
     }
+
+    async fn probe_source_rotation_degrees(&self, source_path: &Path) -> AppResult<i32> {
+        let ffprobe_binary = self.ffprobe_binary.clone();
+        let source_path_for_command = source_path.to_path_buf();
+        let output = task::spawn_blocking(move || {
+            std::process::Command::new(ffprobe_binary)
+                .arg("-v")
+                .arg("error")
+                .arg("-select_streams")
+                .arg("v:0")
+                .arg("-show_entries")
+                .arg("stream_tags=rotate:stream_side_data=rotation")
+                .arg("-of")
+                .arg("json")
+                .arg(source_path_for_command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        })
+        .await
+        .map_err(|error| {
+            AppError::internal_with_context("failed to join ffprobe rotation task", error.to_string())
+        })??;
+
+        if !output.status.success() {
+            return Err(AppError::internal_with_context(
+                "ffprobe failed to inspect source segment rotation",
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+
+        let parsed: RotationProbeResponse =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to parse ffprobe source rotation JSON",
+                    error.to_string(),
+                )
+            })?;
+
+        Ok(parsed
+            .streams
+            .into_iter()
+            .find_map(|stream| {
+                stream
+                    .side_data_list
+                    .into_iter()
+                    .find_map(|side_data| side_data.rotation)
+                    .or_else(|| {
+                        stream
+                            .tags
+                            .and_then(|tags| tags.rotate)
+                            .and_then(|value| value.parse::<i32>().ok())
+                    })
+            })
+            .unwrap_or(0))
+    }
+}
+
+fn build_video_filter(rotation_degrees: i32, scaled_width: u32, scaled_height: u32) -> String {
+    let scale_filter = format!("scale={scaled_width}:{scaled_height}");
+
+    match rotation_degrees.rem_euclid(360) {
+        90 => format!("transpose=cclock,{scale_filter}"),
+        180 => format!("transpose=clock,transpose=clock,{scale_filter}"),
+        270 => format!("transpose=clock,{scale_filter}"),
+        _ => scale_filter,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RotationProbeResponse {
+    #[serde(default)]
+    streams: Vec<RotationProbeStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RotationProbeStream {
+    tags: Option<RotationProbeTags>,
+    #[serde(default)]
+    side_data_list: Vec<RotationProbeSideData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RotationProbeTags {
+    rotate: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RotationProbeSideData {
+    rotation: Option<i32>,
 }
 
 pub fn compute_scaled_resolution(
@@ -184,7 +283,7 @@ pub struct TranscodedSegment {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_scaled_resolution;
+    use super::{build_video_filter, compute_scaled_resolution};
 
     #[test]
     fn compute_scaled_resolution_keeps_baseline_dimensions_when_source_is_large_enough() {
@@ -208,5 +307,18 @@ mod tests {
 
         assert_eq!(scaled.width, 1214);
         assert_eq!(scaled.height, 2160);
+    }
+
+    #[test]
+    fn build_video_filter_applies_rotation_before_scaling() {
+        assert_eq!(build_video_filter(0, 640, 360), "scale=640:360");
+        assert_eq!(
+            build_video_filter(-90, 640, 360),
+            "transpose=clock,scale=640:360"
+        );
+        assert_eq!(
+            build_video_filter(90, 640, 360),
+            "transpose=cclock,scale=640:360"
+        );
     }
 }

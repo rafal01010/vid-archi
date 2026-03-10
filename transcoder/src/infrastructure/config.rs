@@ -29,6 +29,7 @@ pub struct TranscoderConfig {
     pub max_transcoding_attempts: i32,
     pub transcoder_temp_dir: PathBuf,
     pub ffmpeg_binary: String,
+    pub ffprobe_binary: String,
     pub enable_aws_cli_s3_fallback: bool,
 }
 
@@ -97,6 +98,7 @@ impl TranscoderConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp/vid-archi-transcoder"));
         let ffmpeg_binary = env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_owned());
+        let ffprobe_binary = env::var("FFPROBE_BIN").unwrap_or_else(|_| "ffprobe".to_owned());
         let enable_aws_cli_s3_fallback = read_env_with_default("ENABLE_AWS_CLI_S3_FALLBACK", true)?;
 
         Ok(Self {
@@ -124,6 +126,7 @@ impl TranscoderConfig {
             max_transcoding_attempts,
             transcoder_temp_dir,
             ffmpeg_binary,
+            ffprobe_binary,
             enable_aws_cli_s3_fallback,
         })
     }
