@@ -430,23 +430,29 @@ impl TranscoderRuntime {
                 )
                 .await?;
 
+            if self.policy.is_baseline_rendition(&job.rendition) {
+                let queued_jobs = self
+                    .repository
+                    .list_queued_additional_transcoding_jobs(job.video_id)
+                    .await?;
+                return Ok((
+                    queued_jobs
+                        .into_iter()
+                        .map(map_queued_job_to_message)
+                        .collect(),
+                    should_cleanup_source_segments,
+                ));
+            }
+
             Ok((Vec::new(), should_cleanup_source_segments))
         }
         .await;
 
         match completion_result {
-            Ok((mut follow_up_jobs, should_cleanup_source_segments)) => {
+            Ok((follow_up_jobs, should_cleanup_source_segments)) => {
                 self.repository
                     .commit_video_completion_session(completion_session)
                     .await?;
-
-                let queued_jobs = self
-                    .repository
-                    .list_queued_additional_transcoding_jobs(job.video_id)
-                    .await?;
-                if !queued_jobs.is_empty() {
-                    follow_up_jobs.extend(queued_jobs.into_iter().map(map_queued_job_to_message));
-                }
 
                 if should_cleanup_source_segments {
                     let prefix = format!("videos/{}/source/segments/", job.video_id);
