@@ -81,15 +81,10 @@ impl VideoRepository {
                 created_at,
                 updated_at,
                 baseline_ready_at,
-                COALESCE(
-                    ready_at,
-                    (
-                        SELECT MAX(tj.finished_at)
-                        FROM transcoding_jobs tj
-                        WHERE tj.video_id = videos.id
-                          AND tj.status = 'SUCCEEDED'::transcoding_job_status
-                    )
-                ) AS processing_completed_at,
+                CASE
+                    WHEN status = 'READY'::video_status THEN ready_at
+                    ELSE NULL
+                END AS processing_completed_at,
                 manifest_s3_key,
                 error_code,
                 error_message

@@ -38,7 +38,13 @@ pub fn render_variant_playlist(segments: &[VariantPlaylistSegment]) -> String {
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
     );
 
-    for segment in segments {
+    for (index, segment) in segments.iter().enumerate() {
+        // Each output file is transcoded from an independently reset source segment.
+        // Explicit discontinuities let HLS players safely join those standalone timelines.
+        if index > 0 {
+            manifest.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+
         manifest.push_str(&format!(
             "#EXTINF:{:.3},\n{}\n",
             segment.duration_seconds, segment.segment_path
@@ -97,6 +103,7 @@ mod tests {
         assert!(manifest.contains("#EXT-X-TARGETDURATION:4"));
         assert!(manifest.contains("segments/segment_00000.ts"));
         assert!(manifest.contains("segments/segment_00001.ts"));
+        assert_eq!(manifest.matches("#EXT-X-DISCONTINUITY").count(), 1);
         assert!(manifest.contains("#EXT-X-ENDLIST"));
     }
 }
