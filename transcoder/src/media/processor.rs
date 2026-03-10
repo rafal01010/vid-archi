@@ -83,6 +83,12 @@ impl MediaProcessor {
                 .arg("48000")
                 .arg("-ac")
                 .arg("2")
+                // Standalone MPEG-TS outputs need zero-ish timeline starts so the
+                // assembled HLS playlist does not stall after the first segment.
+                .arg("-muxpreload")
+                .arg("0")
+                .arg("-muxdelay")
+                .arg("0")
                 .arg("-f")
                 .arg("mpegts")
                 .arg(output_segment_path_for_command)
