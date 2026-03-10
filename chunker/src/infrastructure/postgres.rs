@@ -38,9 +38,9 @@ impl ChunkerRepository {
                 INNER JOIN videos v
                     ON v.id = p.video_id
                 WHERE p.id = $2
-                  AND p.job_type = 'BASELINE'::processing_job_type
+                  AND p.job_type = 'INTERMEDIATE_RENDITIONS'::processing_job_type
                   AND p.status = 'QUEUED'::processing_job_status
-                  AND v.status = 'UPLOADED'::video_status
+                  AND v.status = 'BASELINE_READY'::video_status
                 FOR UPDATE SKIP LOCKED
             )
             UPDATE processing_jobs p
@@ -69,28 +69,6 @@ impl ChunkerRepository {
             return Ok(None);
         };
 
-        let updated_rows = sqlx::query(
-            r#"
-            UPDATE videos
-            SET status = 'PROCESSING_BASELINE'::video_status,
-                error_code = NULL,
-                error_message = NULL,
-                updated_at = NOW()
-            WHERE id = $1
-              AND status = 'UPLOADED'::video_status
-            "#,
-        )
-        .bind(claimed_job.video_id)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-
-        if updated_rows != 1 {
-            return Err(AppError::conflict(
-                "video was not in UPLOADED state when chunker claimed the baseline job",
-            ));
-        }
-
         transaction.commit().await?;
 
         Ok(Some(claimed_job))
@@ -114,17 +92,15 @@ impl ChunkerRepository {
 
     pub async fn dispatch_transcoding_jobs(
         &self,
-        processing_job_id: Uuid,
+        _processing_job_id: Uuid,
         video_id: Uuid,
         correlation_id: &str,
         source_width: u32,
         source_height: u32,
-        baseline_rendition_name: &str,
         additional_rendition_names: &[String],
         intermediate_playlist_s3_key: &str,
         source_duration_seconds: f64,
         ready_rendition: Option<&ReadyRenditionSeed>,
-        attempt: i32,
     ) -> AppResult<Vec<QueuedTranscodingJobRecord>> {
         let mut transaction = self.pool.begin().await?;
 
@@ -143,48 +119,7 @@ impl ChunkerRepository {
         .execute(&mut *transaction)
         .await?;
 
-        if baseline_rendition_name != ready_rendition.map(|value| value.rendition_name.as_str()).unwrap_or("") {
-            sqlx::query(
-                r#"
-                INSERT INTO transcoding_jobs (
-                    id,
-                    processing_job_id,
-                    video_id,
-                    rendition,
-                    segment_index,
-                    source_segment_s3_key,
-                    source_segment_duration_seconds,
-                    attempt,
-                    status,
-                    correlation_id
-                )
-                VALUES (
-                    $1,
-                    $2,
-                    $3,
-                    $4::video_rendition_name,
-                    0,
-                    $5,
-                    $6,
-                    $7,
-                    'QUEUED'::transcoding_job_status,
-                    $8
-                )
-                ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(processing_job_id)
-            .bind(video_id)
-            .bind(baseline_rendition_name)
-            .bind(intermediate_playlist_s3_key)
-            .bind(source_duration_seconds)
-            .bind(attempt)
-            .bind(correlation_id)
-            .execute(&mut *transaction)
-            .await?;
-        }
-
+        let mut queued_additional_job_id = None;
         if !additional_rendition_names.is_empty() {
             let additional_renditions_job_id = Uuid::new_v4();
 
@@ -215,7 +150,7 @@ impl ChunkerRepository {
             .execute(&mut *transaction)
             .await?;
 
-            let queued_additional_job_id = sqlx::query_scalar::<_, Uuid>(
+            queued_additional_job_id = Some(sqlx::query_scalar::<_, Uuid>(
                 r#"
                 SELECT id
                 FROM processing_jobs
@@ -227,7 +162,7 @@ impl ChunkerRepository {
             )
             .bind(video_id)
             .fetch_one(&mut *transaction)
-            .await?;
+            .await?);
 
             for rendition_name in additional_rendition_names {
                 sqlx::query(
@@ -257,10 +192,10 @@ impl ChunkerRepository {
                         $7
                     )
                     ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
-                    "#,
+                "#,
                 )
                 .bind(Uuid::new_v4())
-                .bind(queued_additional_job_id)
+                .bind(queued_additional_job_id.expect("additional rendition job id"))
                 .bind(video_id)
                 .bind(rendition_name)
                 .bind(intermediate_playlist_s3_key)
@@ -325,35 +260,33 @@ impl ChunkerRepository {
             .await?;
         }
 
-        let baseline_jobs = sqlx::query_as::<_, QueuedTranscodingJobRecord>(
-            r#"
-            SELECT
-                id AS transcoding_job_id,
-                processing_job_id,
-                video_id,
-                rendition::text AS rendition,
-                segment_index,
-                correlation_id,
-                attempt
-            FROM transcoding_jobs
-            WHERE video_id = $1
-              AND processing_job_id = $2
-              AND rendition = $3::video_rendition_name
-              AND segment_index = 0
-              AND attempt = $4
-            ORDER BY segment_index ASC
-            "#,
-        )
-        .bind(video_id)
-        .bind(processing_job_id)
-        .bind(baseline_rendition_name)
-        .bind(attempt)
-        .fetch_all(&mut *transaction)
-        .await?;
+        let queued_jobs = if let Some(queued_additional_job_id) = queued_additional_job_id {
+            sqlx::query_as::<_, QueuedTranscodingJobRecord>(
+                r#"
+                SELECT
+                    id AS transcoding_job_id,
+                    processing_job_id,
+                    video_id,
+                    rendition::text AS rendition,
+                    segment_index,
+                    correlation_id,
+                    attempt
+                FROM transcoding_jobs
+                WHERE processing_job_id = $1
+                  AND status = 'QUEUED'::transcoding_job_status
+                ORDER BY rendition ASC, segment_index ASC
+                "#,
+            )
+            .bind(queued_additional_job_id)
+            .fetch_all(&mut *transaction)
+            .await?
+        } else {
+            Vec::new()
+        };
 
         transaction.commit().await?;
 
-        Ok(baseline_jobs)
+        Ok(queued_jobs)
     }
 
     pub async fn list_queued_transcoding_jobs_for_processing_job(
@@ -380,6 +313,81 @@ impl ChunkerRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(AppError::from)
+    }
+
+    pub async fn list_ready_manifest_variants(
+        &self,
+        video_id: Uuid,
+    ) -> AppResult<Vec<ReadyManifestVariantRecord>> {
+        sqlx::query_as::<_, ReadyManifestVariantRecord>(
+            r#"
+            SELECT
+                rendition::text AS rendition,
+                playlist_key,
+                output_width,
+                output_height,
+                target_video_bitrate_kbps,
+                target_audio_bitrate_kbps
+            FROM video_renditions
+            WHERE video_id = $1
+              AND status = 'READY'::video_rendition_status
+            "#,
+        )
+        .bind(video_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    pub async fn mark_intermediate_job_succeeded(
+        &self,
+        processing_job_id: Uuid,
+        video_id: Uuid,
+        mark_video_ready: bool,
+        manifest_s3_key: &str,
+    ) -> AppResult<()> {
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            UPDATE processing_jobs
+            SET status = 'SUCCEEDED'::processing_job_status,
+                finished_at = NOW(),
+                error = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+              AND job_type = 'INTERMEDIATE_RENDITIONS'::processing_job_type
+              AND status = 'RUNNING'::processing_job_status
+            "#,
+        )
+        .bind(processing_job_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        if mark_video_ready {
+            sqlx::query(
+                r#"
+                UPDATE videos
+                SET status = 'READY'::video_status,
+                    is_streamable = TRUE,
+                    manifest_s3_key = $2,
+                    ready_at = COALESCE(ready_at, NOW()),
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status IN ('BASELINE_READY'::video_status, 'PROCESSING_FULL'::video_status)
+                "#,
+            )
+            .bind(video_id)
+            .bind(manifest_s3_key)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+
+        Ok(())
     }
 
     pub async fn mark_chunking_failed(
@@ -425,7 +433,7 @@ impl ChunkerRepository {
                 VALUES (
                     $1,
                     $2,
-                    'BASELINE'::processing_job_type,
+                    'INTERMEDIATE_RENDITIONS'::processing_job_type,
                     $3,
                     'QUEUED'::processing_job_status,
                     $4
@@ -439,22 +447,6 @@ impl ChunkerRepository {
             .bind(correlation_id)
             .execute(&mut *transaction)
             .await?;
-
-            sqlx::query(
-                r#"
-                UPDATE videos
-                SET status = 'UPLOADED'::video_status,
-                    error_code = NULL,
-                    error_message = NULL,
-                    updated_at = NOW()
-                WHERE id = $1
-                  AND status = 'PROCESSING_BASELINE'::video_status
-                "#,
-            )
-            .bind(video_id)
-            .execute(&mut *transaction)
-            .await?;
-
             transaction.commit().await?;
 
             return Ok(ChunkerFailureDisposition::RetryQueued {
@@ -467,16 +459,20 @@ impl ChunkerRepository {
             r#"
             UPDATE videos
             SET status = 'FAILED'::video_status,
-                is_streamable = FALSE,
-                error_code = 'CHUNKER_DISPATCH_FAILED',
+                is_streamable = TRUE,
+                error_code = 'INTERMEDIATE_CHUNKER_FAILED',
                 error_message = $2,
                 updated_at = NOW()
             WHERE id = $1
-              AND status = 'PROCESSING_BASELINE'::video_status
+              AND status IN (
+                'BASELINE_READY'::video_status,
+                'PROCESSING_FULL'::video_status,
+                'READY'::video_status
+              )
             "#,
         )
         .bind(video_id)
-        .bind("This video could not be prepared for playback.")
+        .bind("Playback is available, but some higher quality options could not be finished.")
         .execute(&mut *transaction)
         .await?;
 
@@ -503,6 +499,16 @@ pub struct ClaimedBaselineJob {
     pub attempt: i32,
     pub source_s3_key: String,
     pub correlation_id: String,
+}
+
+#[derive(Debug, FromRow)]
+pub struct ReadyManifestVariantRecord {
+    pub rendition: String,
+    pub playlist_key: String,
+    pub output_width: Option<i32>,
+    pub output_height: Option<i32>,
+    pub target_video_bitrate_kbps: Option<i32>,
+    pub target_audio_bitrate_kbps: Option<i32>,
 }
 
 #[derive(Debug, Clone)]

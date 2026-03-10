@@ -7,7 +7,7 @@ use tracing::Instrument;
 use crate::domain::video_policy::VideoPolicy;
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::config::TranscoderConfig;
-use crate::infrastructure::message_queue::TranscoderJobMessage;
+use crate::infrastructure::message_queue::{ChunkerJobMessage, TranscoderJobMessage};
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
     ClaimedTranscodingJob, QueuedTranscodingJobRecord, ReadyManifestVariantRecord,
@@ -24,6 +24,7 @@ pub enum TranscoderProcessOutcome {
         rendition: String,
         segment_index: i32,
         follow_up_jobs: Vec<TranscoderJobMessage>,
+        follow_up_chunker_job: Option<ChunkerJobMessage>,
     },
     RetryQueued {
         transcoding_job_id: uuid::Uuid,
@@ -103,20 +104,19 @@ impl TranscoderRuntime {
             .await?
         else {
             if is_baseline_rendition {
-                let follow_up_jobs = self
+                let follow_up_chunker_job = self
                     .repository
-                    .list_queued_additional_transcoding_jobs(queue_message.video_id)
-                    .await?;
-                if !follow_up_jobs.is_empty() {
+                    .find_queued_intermediate_processing_job(queue_message.video_id)
+                    .await?
+                    .map(map_queued_processing_job_to_chunker_message);
+                if follow_up_chunker_job.is_some() {
                     return Ok(TranscoderProcessOutcome::Processed {
                         transcoding_job_id: queue_message.transcoding_job_id,
                         video_id: queue_message.video_id,
                         rendition: queue_message.rendition.clone(),
                         segment_index: queue_message.segment_index,
-                        follow_up_jobs: follow_up_jobs
-                            .into_iter()
-                            .map(map_queued_job_to_message)
-                            .collect(),
+                        follow_up_jobs: Vec::new(),
+                        follow_up_chunker_job,
                     });
                 }
             }
@@ -177,12 +177,16 @@ impl TranscoderRuntime {
         self.cleanup_processing_directory(&processing_directory);
 
         match outcome {
-            Ok(follow_up_jobs) => Ok(TranscoderProcessOutcome::Processed {
+            Ok(ProcessSuccess {
+                follow_up_jobs,
+                follow_up_chunker_job,
+            }) => Ok(TranscoderProcessOutcome::Processed {
                 transcoding_job_id: job.transcoding_job_id,
                 video_id: job.video_id,
                 rendition: job.rendition.clone(),
                 segment_index: job.segment_index,
                 follow_up_jobs,
+                follow_up_chunker_job,
             }),
             Err(error) => {
                 if !self.repository.video_exists(job.video_id).await? {
@@ -233,12 +237,18 @@ impl TranscoderRuntime {
         &self,
         job: &ClaimedTranscodingJob,
         processing_directory: &PathBuf,
-    ) -> AppResult<Vec<TranscoderJobMessage>> {
+    ) -> AppResult<ProcessSuccess> {
         tracing::info!(
             source_segment_s3_key = %job.source_segment_s3_key,
             segment_index = job.segment_index,
             "claimed transcoding rendition job"
         );
+
+        if is_original_source_key(job) {
+            return self
+                .process_baseline_from_original_source(job, processing_directory)
+                .await;
+        }
 
         let source_width = job.source_width.ok_or_else(|| {
             AppError::conflict("source width is missing; chunker must persist it first")
@@ -296,7 +306,7 @@ impl TranscoderRuntime {
                 rendition = %job.rendition,
                 "video was deleted while the rendition was transcoding; skipping artifact upload"
             );
-            return Ok(Vec::new());
+            return Ok(ProcessSuccess::default());
         }
 
         let playlist_key = format!(
@@ -391,20 +401,6 @@ impl TranscoderRuntime {
                 )
                 .await?;
 
-            if self.policy.is_baseline_rendition(&job.rendition) {
-                let queued_jobs = self
-                    .repository
-                    .list_queued_additional_transcoding_jobs(job.video_id)
-                    .await?;
-                return Ok((
-                    queued_jobs
-                        .into_iter()
-                        .map(map_queued_job_to_message)
-                        .collect(),
-                    should_cleanup_source_segments,
-                ));
-            }
-
             Ok((Vec::new(), should_cleanup_source_segments))
         }
         .await;
@@ -436,7 +432,190 @@ impl TranscoderRuntime {
                         }
                     }
                 }
-                Ok(follow_up_jobs)
+                Ok(ProcessSuccess {
+                    follow_up_jobs,
+                    follow_up_chunker_job: None,
+                })
+            }
+            Err(error) => {
+                self.repository
+                    .rollback_video_completion_session(completion_session)
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn process_baseline_from_original_source(
+        &self,
+        job: &ClaimedTranscodingJob,
+        processing_directory: &PathBuf,
+    ) -> AppResult<ProcessSuccess> {
+        let rendition_profile = self
+            .policy
+            .find_rendition_profile(&job.rendition)
+            .ok_or_else(|| {
+                AppError::conflict("requested rendition is not defined in the video policy")
+            })?;
+        let source_directory = processing_directory.join("source");
+        let source_path = source_directory.join("original");
+
+        self.object_storage
+            .download_source_object(&job.source_segment_s3_key, &source_path)
+            .await?;
+        let source_video = self.media_processor.probe_source_video(&source_path).await?;
+        self.repository
+            .persist_source_dimensions(job.video_id, source_video.width, source_video.height)
+            .await?;
+        tracing::info!(
+            path = %source_path.display(),
+            source_width = source_video.width,
+            source_height = source_video.height,
+            rendition = %job.rendition,
+            "downloaded source object for baseline transcoding"
+        );
+
+        let transcoded_rendition = self
+            .media_processor
+            .transcode_source_to_rendition(
+                &source_path,
+                &processing_directory.join("hls"),
+                &rendition_profile,
+                &source_video,
+            )
+            .await?;
+
+        if !self.repository.video_exists(job.video_id).await? {
+            tracing::info!(
+                video_id = %job.video_id,
+                transcoding_job_id = %job.transcoding_job_id,
+                rendition = %job.rendition,
+                "video was deleted while the baseline rendition was transcoding; skipping artifact upload"
+            );
+            return Ok(ProcessSuccess::default());
+        }
+
+        let playlist_key = format!(
+            "videos/{}/hls/{}/{}",
+            job.video_id, job.rendition, rendition_profile.variant_playlist_file_name
+        );
+        self.repository
+            .mark_rendition_processing(
+                job.video_id,
+                &job.rendition,
+                &transcoded_rendition.codec,
+                &transcoded_rendition.container,
+                &playlist_key,
+                transcoded_rendition.output_width as i32,
+                transcoded_rendition.output_height as i32,
+                transcoded_rendition.target_video_bitrate_kbps as i32,
+                transcoded_rendition.target_audio_bitrate_kbps as i32,
+            )
+            .await?;
+
+        self.object_storage
+            .upload_processing_directory(
+                &format!("videos/{}/hls/{}", job.video_id, job.rendition),
+                &processing_directory.join("hls").join(&job.rendition),
+            )
+            .await?;
+
+        let planned_renditions = self
+            .policy
+            .source_eligible_rendition_names(source_video.width, source_video.height);
+        let should_enqueue_intermediate = planned_renditions.iter().any(|rendition| rendition != &job.rendition);
+
+        let mut completion_session = self
+            .repository
+            .begin_video_completion_session(job.video_id)
+            .await?;
+        let completion_result = async {
+            self.repository
+                .mark_transcoding_segment_succeeded_in_session(
+                    &mut completion_session,
+                    job.transcoding_job_id,
+                    &playlist_key,
+                )
+                .await?;
+
+            let existing_ready_variants = self
+                .repository
+                .list_ready_manifest_variants_in_session(&mut completion_session, job.video_id)
+                .await?;
+            let manifest_variants = self.build_master_manifest_variants(
+                job.video_id,
+                &job.rendition,
+                &transcoded_rendition,
+                existing_ready_variants,
+                &playlist_key,
+            );
+            let master_manifest_key = self
+                .write_master_manifest(job.video_id, processing_directory, &manifest_variants)
+                .await?;
+            self.object_storage
+                .upload_processing_file(
+                    &master_manifest_key,
+                    &processing_directory.join("hls").join("master.m3u8"),
+                )
+                .await?;
+
+            let video_progress = self.determine_video_progress_update(
+                job,
+                source_video.width,
+                source_video.height,
+                &manifest_variants,
+                &master_manifest_key,
+            );
+            let completion = RenditionCompletionUpdate {
+                processing_job_id: job.processing_job_id,
+                video_id: job.video_id,
+                rendition_name: job.rendition.clone(),
+                codec: transcoded_rendition.codec.clone(),
+                container: transcoded_rendition.container.clone(),
+                playlist_key: playlist_key.clone(),
+                output_width: transcoded_rendition.output_width as i32,
+                output_height: transcoded_rendition.output_height as i32,
+                target_video_bitrate_kbps: transcoded_rendition.target_video_bitrate_kbps as i32,
+                target_audio_bitrate_kbps: transcoded_rendition.target_audio_bitrate_kbps as i32,
+                segment_count: transcoded_rendition.segment_count,
+            };
+
+            self.repository
+                .mark_rendition_ready_in_session(
+                    &mut completion_session,
+                    completion,
+                    video_progress,
+                )
+                .await?;
+
+            let chunker_job = if should_enqueue_intermediate {
+                Some(
+                    self.repository
+                        .enqueue_intermediate_processing_job_in_session(
+                            &mut completion_session,
+                            job.video_id,
+                            &job.correlation_id,
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+
+            Ok(chunker_job.map(map_queued_processing_job_to_chunker_message))
+        }
+        .await;
+
+        match completion_result {
+            Ok(follow_up_chunker_job) => {
+                self.repository
+                    .commit_video_completion_session(completion_session)
+                    .await?;
+
+                Ok(ProcessSuccess {
+                    follow_up_jobs: Vec::new(),
+                    follow_up_chunker_job,
+                })
             }
             Err(error) => {
                 self.repository
@@ -566,6 +745,11 @@ fn relative_playlist_path(video_id: uuid::Uuid, playlist_key: &str) -> Option<St
     playlist_key.strip_prefix(&prefix).map(str::to_owned)
 }
 
+fn is_original_source_key(job: &ClaimedTranscodingJob) -> bool {
+    job.source_segment_s3_key
+        == format!("videos/{}/source/original", job.video_id)
+}
+
 fn intermediate_prefix_from_playlist_key(playlist_key: &str) -> AppResult<String> {
     let playlist_path = PathBuf::from(playlist_key);
     let parent = playlist_path
@@ -618,4 +802,21 @@ fn map_queued_job_to_message(job: QueuedTranscodingJobRecord) -> TranscoderJobMe
         correlation_id: job.correlation_id,
         attempt: job.attempt,
     }
+}
+
+fn map_queued_processing_job_to_chunker_message(
+    job: crate::infrastructure::postgres::QueuedProcessingJobRecord,
+) -> ChunkerJobMessage {
+    ChunkerJobMessage {
+        processing_job_id: job.processing_job_id,
+        video_id: job.video_id,
+        correlation_id: job.correlation_id,
+        attempt: job.attempt,
+    }
+}
+
+#[derive(Default)]
+struct ProcessSuccess {
+    follow_up_jobs: Vec<TranscoderJobMessage>,
+    follow_up_chunker_job: Option<ChunkerJobMessage>,
 }

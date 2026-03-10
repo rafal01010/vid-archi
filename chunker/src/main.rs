@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .await?;
                 }
                 queue_consumer.delete(&message.receipt_handle).await?;
-                tracing::info!(%job_id, %video_id, "chunker dispatched baseline transcoder jobs");
+                tracing::info!(%job_id, %video_id, "chunker dispatched lower-rendition transcoder jobs");
             }
             Ok(ChunkerProcessOutcome::RetryQueued {
                 job_id,

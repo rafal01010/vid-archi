@@ -152,9 +152,10 @@ Core components:
 - `Chunker Service (Rust + ffprobe)`
   - Claims queued baseline jobs after upload completion.
   - Probes source dimensions.
-  - Dispatches per-rendition transcoding jobs.
+  - Builds one highest-eligible intermediate HLS source and dispatches baseline/lower-rendition jobs.
 - `Transcoder Service (Rust + ffmpeg)`
   - One container runs one configured rendition.
+  - Consumes the intermediate HLS input from the upload bucket.
   - Baseline rendition first (`360p`).
   - Marks streamable only when baseline manifest exists.
   - Additional rendition containers can scale independently.
@@ -168,7 +169,7 @@ Core components:
 
 Critical design principles:
 - Direct-to-S3 upload (no large-file pass-through API servers).
-- Separate upload chunks from playback segments.
+- Keep upload transfer separate from playback packaging, with an intermediate HLS stage for worker fanout.
 - State machine with `BASELINE_READY` as stream gate.
 - Shared durable metadata store to keep multi-instance behavior consistent.
 
@@ -497,12 +498,12 @@ API impact note for the expanded ladder:
 ### 10.2 Processing flow (time-to-stream first)
 
 1. Chunker picks the parent baseline job.
-2. Chunker probes the original file dimensions and enqueues the baseline `360p` transcoder job.
-3. The baseline transcoder builds segmented `360p` HLS output and creates the variant playlist.
-4. Upload manifest/segments to S3.
-5. Create/update master manifest with the `360p` entry only.
-6. DB transition to `BASELINE_READY` and set `is_streamable=true` only after the full `360p` VOD artifacts exist.
-7. Later, enqueue and complete higher renditions that do not exceed the source resolution, then update the master manifest and set `READY`.
+2. Chunker probes the original file dimensions and builds one continuous highest-eligible intermediate HLS rendition from the uploaded source.
+3. Chunker uploads that intermediate HLS package to the upload bucket and creates the baseline/lower-rendition transcoding jobs.
+4. If the highest rendition is above the baseline, chunker also publishes that top rendition directly to the processed bucket so it does not need to be transcoded twice.
+5. The baseline transcoder consumes the intermediate HLS input, builds the final `360p` HLS output, and uploads the baseline artifacts plus refreshed master manifest to the processed bucket.
+6. DB transition to `BASELINE_READY` and set `is_streamable=true` only after the full baseline VOD artifacts exist.
+7. Later, enqueue and complete the remaining lower renditions that do not exceed the source resolution, then update the master manifest and set `READY`.
 
 ### 10.3 Playback flow
 
@@ -990,9 +991,10 @@ Implementation note for `5a/5b/5c/5d`:
 - `transcoder/` now contains the Rust service that processes one configured rendition per container.
 - Current executable shape uses a separate processing EC2 host plus Docker Compose services: `chunker` and `transcoder-<resolution>`.
 - The backend now inserts the durable `BASELINE` job row and immediately publishes a chunker SQS message after multipart completion, so upload completion triggers processing through the queue path instead of worker-side DB polling.
-- The chunker now consumes the chunker SQS queue, claims the referenced `BASELINE` job atomically, moves the video from `UPLOADED` to `PROCESSING_BASELINE`, downloads the source object, persists source dimensions via `ffprobe`, inserts the baseline `360p` child job into `transcoding_jobs`, and publishes the baseline transcoder SQS message.
+- The chunker now consumes the chunker SQS queue, claims the referenced `BASELINE` job atomically, moves the video from `UPLOADED` to `PROCESSING_BASELINE`, downloads the source object, persists source dimensions via `ffprobe`, builds one continuous highest-eligible intermediate HLS rendition, uploads that intermediate rendition to the upload bucket, and inserts the baseline/lower-rendition jobs into `transcoding_jobs`.
 - The chunker now commits source dimensions, the baseline child job, and any source-eligible additional-rendition jobs in one database transaction so a chunker failure cannot leave a partially dispatched baseline pipeline behind.
-- The baseline transcoder now consumes the dedicated `360p` SQS queue, claims the referenced `360p` row atomically, downloads `videos/{video_id}/source/original`, generates `360p` HLS artifacts via `ffmpeg`, writes `videos/{video_id}/hls/master.m3u8`, uploads artifacts to the processed bucket, and then releases queued higher-rendition jobs onto their own rendition-specific transcoder queues once baseline playback is available.
+- The chunker also publishes the same highest-quality HLS directly to the processed bucket when that avoids redundant transcoding of the top rendition.
+- The baseline transcoder now consumes the dedicated `360p` SQS queue, claims the referenced `360p` row atomically, downloads the intermediate HLS input from `videos/{video_id}/source/intermediate/...`, generates `360p` HLS artifacts via `ffmpeg`, writes `videos/{video_id}/hls/master.m3u8`, uploads artifacts to the processed bucket, and then releases queued lower-rendition jobs onto their own rendition-specific transcoder queues once baseline playback is available.
 - `BASELINE_READY` is written only after the transcoder has finished the full `360p` VOD package, uploaded the baseline playlist, uploaded the master manifest, uploaded all baseline segments, and persisted `manifest_s3_key`.
 - `GET /api/videos/{publicId}` now exposes `manifestUrl` from shared metadata using `PROCESSED_ASSET_BASE_URL` or `CDN_BASE_URL`.
 - The runtime assets now live inside `chunker/` and `transcoder/` so each service folder can be transferred to its own EC2 instance. Scale `chunker` replicas for dispatch pressure and scale `transcoder-360p`, `transcoder-720p`, or `transcoder-2160p` independently for rendition-specific load.
@@ -1026,6 +1028,7 @@ Implementation note for `6a/6b/6c/6d`:
 
 Implementation note for `7a/7b/7c/7d`:
 - `chunker/` now reads the shared adaptive ladder, keeps the baseline `360p` dispatch, and also inserts one `ADDITIONAL_RENDITIONS` parent job plus source-eligible higher-rendition rows into `transcoding_jobs`.
+- The chunker-generated intermediate HLS output is now the shared source for the baseline and lower-rendition transcoders, so workers no longer repeatedly download the original upload for every rendition.
 - Non-baseline transcoders do not start until the baseline path has already made the video streamable. The first additional-renditions claim moves the video from `BASELINE_READY` to `PROCESSING_FULL`.
 - Every successful rendition rebuilds `videos/{video_id}/hls/master.m3u8` from the current set of ready renditions, uploads the refreshed master manifest, and keeps `Auto` playback aligned with fixed-quality playlist URLs.
 - Additional renditions now persist `codec`, `container`, `playlist_key`, actual encoded `output_width/output_height`, target video/audio bitrate metadata, and `segment_count` in `video_renditions` before their final `READY` transition.
@@ -1093,7 +1096,7 @@ Schedule note:
 - [x] 11f. Add ADR/note: API Gateway omitted in current STG for cost; include benefits and upgrade path to production-like ingress.
 
 Implementation note for `11a/11b/11c/11e/11f`:
-- `docs/architecture.md` now includes a component diagram, an upload-to-first-play sequence diagram, the delete-by-code cleanup path, the structured logging model, the current STG topology, and the ingress note for the current ALB-only path.
+- `docs/architecture.md` now includes a component diagram, an upload-to-first-play sequence diagram, a concise main-path explanation for upload through playback, the delete-by-code cleanup path, the structured logging model, the current STG topology, and the ingress note for the current ALB-only path.
 - `docs/api.md` now documents the implemented endpoints with concise request/response examples, including the `x-correlation-id` behavior and the delete-video contract.
 - `docs/operational-costs.md` now captures the current STG footprint, cost-control decisions, and monthly guardrails.
 - `docs/stg-deployment.md` now consolidates the first-time STG deployment steps, ALB listener/target-group setup, environment templates, and redeploy commands for the current app-host plus worker-host layout.

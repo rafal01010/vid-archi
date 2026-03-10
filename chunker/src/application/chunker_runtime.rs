@@ -11,7 +11,7 @@ use crate::infrastructure::message_queue::TranscoderJobMessage;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
     ChunkerFailureDisposition, ChunkerRepository, ClaimedBaselineJob, QueuedTranscodingJobRecord,
-    ReadyRenditionSeed,
+    ReadyManifestVariantRecord, ReadyRenditionSeed,
 };
 use crate::media::{PreparedIntermediateRendition, SourceProbe, SourceSegmenter};
 
@@ -168,7 +168,7 @@ impl ChunkerRuntime {
         job: &ClaimedBaselineJob,
         processing_directory: &PathBuf,
     ) -> AppResult<Vec<TranscoderJobMessage>> {
-        tracing::info!(source_s3_key = %job.source_s3_key, "claimed baseline processing job");
+        tracing::info!(source_s3_key = %job.source_s3_key, "claimed post-baseline intermediate processing job");
 
         let source_path = processing_directory.join("source").join("original");
         self.object_storage
@@ -258,15 +258,32 @@ impl ChunkerRuntime {
                 &job.correlation_id,
                 source_metadata.width,
                 source_metadata.height,
-                &baseline_rendition,
                 &additional_renditions,
                 &intermediate_playlist_s3_key,
                 source_duration_seconds,
                 ready_rendition_seed.as_ref(),
-                job.attempt,
             )
             .await?;
-        tracing::info!(queued_job_count = queued_jobs.len(), "queued baseline and lower-rendition transcoding jobs");
+        let ready_variants = self.repository.list_ready_manifest_variants(job.video_id).await?;
+        let master_manifest_key = self
+            .write_master_manifest(job.video_id, processing_directory, &ready_variants)
+            .await?;
+        self.object_storage
+            .upload_processed_file(
+                &master_manifest_key,
+                &processing_directory.join("hls").join("master.m3u8"),
+                "application/vnd.apple.mpegurl",
+            )
+            .await?;
+        self.repository
+            .mark_intermediate_job_succeeded(
+                job.job_id,
+                job.video_id,
+                queued_jobs.is_empty(),
+                &master_manifest_key,
+            )
+            .await?;
+        tracing::info!(queued_job_count = queued_jobs.len(), "queued lower-rendition transcoding jobs");
 
         Ok(queued_jobs
             .into_iter()
@@ -361,6 +378,44 @@ impl ChunkerRuntime {
             }
         });
     }
+
+    async fn write_master_manifest(
+        &self,
+        video_id: Uuid,
+        processing_directory: &PathBuf,
+        ready_variants: &[ReadyManifestVariantRecord],
+    ) -> AppResult<String> {
+        let variants = self.build_master_manifest_variants(video_id, ready_variants);
+        let manifest_body = render_master_manifest(&variants);
+        let manifest_path = processing_directory.join("hls").join("master.m3u8");
+        tokio::fs::create_dir_all(processing_directory.join("hls")).await?;
+        tokio::fs::write(&manifest_path, manifest_body).await?;
+
+        Ok(format!("videos/{video_id}/hls/master.m3u8"))
+    }
+
+    fn build_master_manifest_variants(
+        &self,
+        video_id: Uuid,
+        ready_variants: &[ReadyManifestVariantRecord],
+    ) -> Vec<MasterManifestVariant> {
+        let mut variants = ready_variants
+            .iter()
+            .filter_map(|variant| {
+                Some(MasterManifestVariant {
+                    rendition: variant.rendition.clone(),
+                    playlist_path: relative_playlist_path(video_id, &variant.playlist_key)?,
+                    width: variant.output_width? as u32,
+                    height: variant.output_height? as u32,
+                    video_bitrate_kbps: variant.target_video_bitrate_kbps? as u32,
+                    audio_bitrate_kbps: variant.target_audio_bitrate_kbps? as u32,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        variants.sort_by_key(|variant| self.policy.rendition_ladder_position(&variant.rendition));
+        variants
+    }
 }
 
 fn map_queued_job_to_message(job: QueuedTranscodingJobRecord) -> TranscoderJobMessage {
@@ -373,6 +428,35 @@ fn map_queued_job_to_message(job: QueuedTranscodingJobRecord) -> TranscoderJobMe
         correlation_id: job.correlation_id,
         attempt: job.attempt,
     }
+}
+
+fn relative_playlist_path(video_id: Uuid, playlist_key: &str) -> Option<String> {
+    let prefix = format!("videos/{video_id}/hls/");
+    playlist_key.strip_prefix(&prefix).map(str::to_owned)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MasterManifestVariant {
+    rendition: String,
+    playlist_path: String,
+    width: u32,
+    height: u32,
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
+}
+
+fn render_master_manifest(variants: &[MasterManifestVariant]) -> String {
+    let mut manifest = String::from("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-INDEPENDENT-SEGMENTS\n");
+
+    for variant in variants {
+        let bandwidth = (variant.video_bitrate_kbps + variant.audio_bitrate_kbps) * 1000;
+        manifest.push_str(&format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth},RESOLUTION={}x{},CODECS=\"avc1.42e01e,mp4a.40.2\"\n{}\n",
+            variant.width, variant.height, variant.playlist_path
+        ));
+    }
+
+    manifest
 }
 
 fn map_chunker_failure(

@@ -75,6 +75,13 @@ impl VideoPolicy {
             .find(|profile| rendition_fits_source(profile.width, profile.height, source_width, source_height))
             .cloned()
     }
+
+    pub fn rendition_ladder_position(&self, rendition: &str) -> usize {
+        self.adaptive_rendition_ladder
+            .iter()
+            .position(|profile| profile.name == rendition)
+            .unwrap_or(usize::MAX)
+    }
 }
 
 fn rendition_fits_source(

@@ -83,8 +83,8 @@ impl TranscoderRepository {
                   AND tj.status = 'QUEUED'::transcoding_job_status
                   AND tj.rendition = $2::video_rendition_name
                   AND p.job_type = 'BASELINE'::processing_job_type
-                  AND p.status = 'RUNNING'::processing_job_status
-                  AND v.status = 'PROCESSING_BASELINE'::video_status
+                  AND p.status IN ('QUEUED'::processing_job_status, 'RUNNING'::processing_job_status)
+                  AND v.status IN ('UPLOADED'::video_status, 'PROCESSING_BASELINE'::video_status)
                 FOR UPDATE SKIP LOCKED
             )
             UPDATE transcoding_jobs tj
@@ -115,9 +115,46 @@ impl TranscoderRepository {
         .fetch_optional(&mut *transaction)
         .await?;
 
+        let Some(claimed_job) = claimed_job else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE processing_jobs
+            SET status = 'RUNNING'::processing_job_status,
+                worker_id = $2,
+                started_at = COALESCE(started_at, NOW()),
+                finished_at = NULL,
+                error = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+              AND job_type = 'BASELINE'::processing_job_type
+              AND status IN ('QUEUED'::processing_job_status, 'RUNNING'::processing_job_status)
+            "#,
+        )
+        .bind(claimed_job.processing_job_id)
+        .bind(worker_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE videos
+            SET status = 'PROCESSING_BASELINE'::video_status,
+                updated_at = NOW()
+            WHERE id = $1
+              AND status IN ('UPLOADED'::video_status, 'PROCESSING_BASELINE'::video_status)
+            "#,
+        )
+        .bind(claimed_job.video_id)
+        .execute(&mut *transaction)
+        .await?;
+
         transaction.commit().await?;
 
-        Ok(claimed_job)
+        Ok(Some(claimed_job))
     }
 
     async fn claim_additional_renditions_job(
@@ -253,6 +290,55 @@ impl TranscoderRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(AppError::from)
+    }
+
+    pub async fn find_queued_intermediate_processing_job(
+        &self,
+        video_id: Uuid,
+    ) -> AppResult<Option<QueuedProcessingJobRecord>> {
+        sqlx::query_as::<_, QueuedProcessingJobRecord>(
+            r#"
+            SELECT
+                id AS processing_job_id,
+                video_id,
+                correlation_id,
+                attempt
+            FROM processing_jobs
+            WHERE video_id = $1
+              AND job_type = 'INTERMEDIATE_RENDITIONS'::processing_job_type
+              AND status = 'QUEUED'::processing_job_status
+            ORDER BY attempt DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(video_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    pub async fn persist_source_dimensions(
+        &self,
+        video_id: Uuid,
+        source_width: u32,
+        source_height: u32,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE videos
+            SET source_width = $2,
+                source_height = $3,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(video_id)
+        .bind(source_width as i32)
+        .bind(source_height as i32)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn begin_video_completion_session(
@@ -562,6 +648,61 @@ impl TranscoderRepository {
         Ok(())
     }
 
+    pub async fn enqueue_intermediate_processing_job_in_session(
+        &self,
+        session: &mut VideoCompletionSession,
+        video_id: Uuid,
+        correlation_id: &str,
+    ) -> AppResult<QueuedProcessingJobRecord> {
+        let job_id = Uuid::new_v4();
+
+        sqlx::query(
+            r#"
+            INSERT INTO processing_jobs (
+                id,
+                video_id,
+                job_type,
+                attempt,
+                status,
+                correlation_id
+            )
+            VALUES (
+                $1,
+                $2,
+                'INTERMEDIATE_RENDITIONS'::processing_job_type,
+                1,
+                'QUEUED'::processing_job_status,
+                $3
+            )
+            ON CONFLICT (video_id, job_type, attempt) DO NOTHING
+            "#,
+        )
+        .bind(job_id)
+        .bind(video_id)
+        .bind(correlation_id)
+        .execute(&mut *session.connection)
+        .await?;
+
+        sqlx::query_as::<_, QueuedProcessingJobRecord>(
+            r#"
+            SELECT
+                id AS processing_job_id,
+                video_id,
+                correlation_id,
+                attempt
+            FROM processing_jobs
+            WHERE video_id = $1
+              AND job_type = 'INTERMEDIATE_RENDITIONS'::processing_job_type
+            ORDER BY attempt DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(video_id)
+        .fetch_one(&mut *session.connection)
+        .await
+        .map_err(AppError::from)
+    }
+
     async fn mark_processing_job_succeeded_in_session(
         &self,
         session: &mut VideoCompletionSession,
@@ -830,6 +971,14 @@ pub struct QueuedTranscodingJobRecord {
     pub video_id: Uuid,
     pub rendition: String,
     pub segment_index: i32,
+    pub correlation_id: String,
+    pub attempt: i32,
+}
+
+#[derive(Debug, FromRow, Clone)]
+pub struct QueuedProcessingJobRecord {
+    pub processing_job_id: Uuid,
+    pub video_id: Uuid,
     pub correlation_id: String,
     pub attempt: i32,
 }

@@ -101,6 +101,7 @@ BEGIN
   ) THEN
     CREATE TYPE processing_job_type AS ENUM (
       'BASELINE',
+      'INTERMEDIATE_RENDITIONS',
       'ADDITIONAL_RENDITIONS'
     );
   END IF;

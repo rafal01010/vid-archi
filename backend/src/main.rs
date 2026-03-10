@@ -14,7 +14,7 @@ use crate::app::{build_router, AppState};
 use crate::application::{UploadService, VideoDeleteService, VideoQueryService};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::AppConfig;
-use crate::infrastructure::message_queue::ChunkerQueuePublisher;
+use crate::infrastructure::message_queue::BaselineTranscoderQueuePublisher;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::VideoRepository;
 use crate::observability::init_tracing;
@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let policy = VideoPolicy::load(&config.video_policy_file).await?;
     let repository = VideoRepository::connect(&config.database_url).await?;
     let object_storage = ObjectStorage::new(&config).await?;
-    let queue_publisher = ChunkerQueuePublisher::new(&config).await?;
+    let queue_publisher = BaselineTranscoderQueuePublisher::new(&config).await?;
     let upload_service = UploadService::new(
         config.clone(),
         policy.clone(),

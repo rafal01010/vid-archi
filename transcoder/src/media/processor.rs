@@ -139,6 +139,220 @@ impl MediaProcessor {
         probe_duration_seconds(&self.ffprobe_binary, source_path, "media duration").await
     }
 
+    pub async fn probe_source_video(&self, source_path: &Path) -> AppResult<ProbedSourceVideo> {
+        let ffprobe_binary = self.ffprobe_binary.clone();
+        let source_path = source_path.to_path_buf();
+        let output = task::spawn_blocking(move || {
+            std::process::Command::new(ffprobe_binary)
+                .arg("-v")
+                .arg("error")
+                .arg("-select_streams")
+                .arg("v:0")
+                .arg("-show_entries")
+                .arg("stream=width,height:stream_tags=rotate:stream_side_data=rotation")
+                .arg("-of")
+                .arg("json")
+                .arg(source_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        })
+        .await
+        .map_err(|error| {
+            AppError::internal_with_context("failed to join ffprobe source probe task", error.to_string())
+        })??;
+
+        if !output.status.success() {
+            return Err(AppError::internal_with_context(
+                "ffprobe failed to inspect the uploaded video",
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+
+        let parsed: RotationProbeResponse =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to parse ffprobe source JSON output",
+                    error.to_string(),
+                )
+            })?;
+
+        let stream = parsed
+            .streams
+            .into_iter()
+            .find(|stream| stream.width.is_some() && stream.height.is_some())
+            .ok_or_else(|| AppError::internal("ffprobe did not return source dimensions"))?;
+
+        let width = stream
+            .width
+            .ok_or_else(|| AppError::internal("ffprobe did not return source width"))?;
+        let height = stream
+            .height
+            .ok_or_else(|| AppError::internal("ffprobe did not return source height"))?;
+        let rotation_degrees = stream
+            .side_data_list
+            .iter()
+            .find_map(|side_data| side_data.rotation)
+            .or_else(|| {
+                stream
+                    .tags
+                    .as_ref()
+                    .and_then(|tags| tags.rotate.as_deref())
+                    .and_then(|value| value.parse::<i32>().ok())
+            })
+            .unwrap_or(0);
+        let requires_swap = rotation_degrees.rem_euclid(180) != 0;
+
+        Ok(if requires_swap {
+            ProbedSourceVideo {
+                width: height,
+                height: width,
+                rotation_degrees,
+            }
+        } else {
+            ProbedSourceVideo {
+                width,
+                height,
+                rotation_degrees,
+            }
+        })
+    }
+
+    pub async fn transcode_source_to_rendition(
+        &self,
+        source_path: &Path,
+        output_root: &Path,
+        profile: &RenditionProfile,
+        source_video: &ProbedSourceVideo,
+    ) -> AppResult<TranscodedRendition> {
+        let scaled_resolution = compute_scaled_resolution(
+            source_video.width,
+            source_video.height,
+            profile.width,
+            profile.height,
+        )?;
+        let video_filter = build_video_filter(
+            source_video.rotation_degrees,
+            scaled_resolution.width,
+            scaled_resolution.height,
+        );
+        let rendition_directory = output_root.join(&profile.name);
+        tokio::fs::create_dir_all(&rendition_directory).await?;
+        let variant_playlist_path = rendition_directory.join(&profile.variant_playlist_file_name);
+        let segment_pattern = rendition_directory.join("segment_%05d.ts");
+        let gop = profile
+            .max_frame_rate
+            .saturating_mul(profile.segment_duration_seconds);
+
+        let ffmpeg_binary = self.ffmpeg_binary.clone();
+        let source_path = source_path.to_path_buf();
+        let variant_playlist_path_for_command = variant_playlist_path.clone();
+        let segment_pattern_for_command = segment_pattern.clone();
+        let max_frame_rate = profile.max_frame_rate;
+        let video_bitrate_kbps = profile.video_bitrate_kbps;
+        let audio_bitrate_kbps = profile.audio_bitrate_kbps;
+        let segment_duration_seconds = profile.segment_duration_seconds;
+        let ffmpeg_output = task::spawn_blocking(move || {
+            std::process::Command::new(ffmpeg_binary)
+                .arg("-y")
+                .arg("-noautorotate")
+                .arg("-i")
+                .arg(source_path)
+                .arg("-vf")
+                .arg(video_filter)
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-profile:v")
+                .arg("main")
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-r")
+                .arg(max_frame_rate.to_string())
+                .arg("-g")
+                .arg(gop.to_string())
+                .arg("-keyint_min")
+                .arg(gop.to_string())
+                .arg("-sc_threshold")
+                .arg("0")
+                .arg("-b:v")
+                .arg(format!("{video_bitrate_kbps}k"))
+                .arg("-maxrate")
+                .arg(format!("{}k", video_bitrate_kbps + 80))
+                .arg("-bufsize")
+                .arg(format!("{}k", video_bitrate_kbps * 2))
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg(format!("{audio_bitrate_kbps}k"))
+                .arg("-ar")
+                .arg("48000")
+                .arg("-ac")
+                .arg("2")
+                .arg("-f")
+                .arg("hls")
+                .arg("-hls_time")
+                .arg(segment_duration_seconds.to_string())
+                .arg("-hls_playlist_type")
+                .arg("vod")
+                .arg("-hls_segment_filename")
+                .arg(segment_pattern_for_command)
+                .arg("-hls_flags")
+                .arg("independent_segments")
+                .arg(variant_playlist_path_for_command)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+        })
+        .await
+        .map_err(|error| {
+            AppError::internal_with_context(
+                "failed to join ffmpeg source rendition task",
+                error.to_string(),
+            )
+        })??;
+
+        if !ffmpeg_output.status.success() {
+            return Err(AppError::internal_with_context(
+                "ffmpeg failed to transcode the uploaded source into a rendition",
+                String::from_utf8_lossy(&ffmpeg_output.stderr),
+            ));
+        }
+
+        let mut entries = tokio::fs::read_dir(&rendition_directory).await?;
+        let mut segment_count = 0_i32;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let is_ts = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("ts"))
+                .unwrap_or(false);
+            if is_ts {
+                segment_count += 1;
+            }
+        }
+
+        if tokio::fs::metadata(&variant_playlist_path).await.is_err() || segment_count == 0 {
+            return Err(AppError::internal(
+                "ffmpeg completed without producing source rendition playlist artifacts",
+            ));
+        }
+
+        Ok(TranscodedRendition {
+            rendition: profile.name.clone(),
+            codec: profile.video_codec.clone(),
+            container: profile.segment_container.clone(),
+            variant_playlist_file_name: profile.variant_playlist_file_name.clone(),
+            output_width: scaled_resolution.width,
+            output_height: scaled_resolution.height,
+            target_video_bitrate_kbps: profile.video_bitrate_kbps,
+            target_audio_bitrate_kbps: profile.audio_bitrate_kbps,
+            segment_count,
+        })
+    }
+
     pub async fn transcode_playlist_to_rendition(
         &self,
         source_playlist_path: &Path,
@@ -398,6 +612,8 @@ struct RotationProbeResponse {
 
 #[derive(Debug, Deserialize)]
 struct RotationProbeStream {
+    width: Option<u32>,
+    height: Option<u32>,
     tags: Option<RotationProbeTags>,
     #[serde(default)]
     side_data_list: Vec<RotationProbeSideData>,
@@ -454,6 +670,13 @@ fn normalize_even_dimension(value: u32) -> u32 {
 pub struct ScaledResolution {
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbedSourceVideo {
+    pub width: u32,
+    pub height: u32,
+    pub rotation_degrees: i32,
 }
 
 #[derive(Debug, Clone)]

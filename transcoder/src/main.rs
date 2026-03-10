@@ -15,7 +15,8 @@ use crate::application::{TranscoderProcessOutcome, TranscoderRuntime};
 use crate::domain::video_policy::VideoPolicy;
 use crate::infrastructure::config::TranscoderConfig;
 use crate::infrastructure::message_queue::{
-    ReceivedTranscoderMessageKind, TranscoderQueueConsumer, TranscoderQueuePublisher,
+    ChunkerQueuePublisher, ReceivedTranscoderMessageKind, TranscoderQueueConsumer,
+    TranscoderQueuePublisher,
 };
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::TranscoderRepository;
@@ -34,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let object_storage = ObjectStorage::new(&config).await?;
     let queue_consumer = TranscoderQueueConsumer::new(&config).await?;
     let queue_publisher = TranscoderQueuePublisher::new(&config).await?;
+    let chunker_queue_publisher = ChunkerQueuePublisher::new(&config).await?;
     let media_processor = MediaProcessor::new(&config);
     let runtime =
         TranscoderRuntime::new(config, policy, repository, object_storage, media_processor);
@@ -59,11 +61,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 rendition,
                 segment_index,
                 follow_up_jobs,
+                follow_up_chunker_job,
             }) => {
-                queue_consumer.delete(&message.receipt_handle).await?;
                 for follow_up_job in follow_up_jobs {
                     queue_publisher.enqueue(follow_up_job).await?;
                 }
+                if let Some(follow_up_chunker_job) = follow_up_chunker_job {
+                    chunker_queue_publisher.enqueue(follow_up_chunker_job).await?;
+                }
+                queue_consumer.delete(&message.receipt_handle).await?;
                 tracing::info!(%transcoding_job_id, %video_id, %rendition, %segment_index, "transcoder completed segment job");
             }
             Ok(TranscoderProcessOutcome::RetryQueued {

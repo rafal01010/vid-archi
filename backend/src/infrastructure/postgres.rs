@@ -362,6 +362,7 @@ impl VideoRepository {
         .await?;
 
         let processing_job_id = Uuid::new_v4();
+        let transcoding_job_id = Uuid::new_v4();
 
         sqlx::query(
             r#"
@@ -390,16 +391,69 @@ impl VideoRepository {
         .execute(&mut *transaction)
         .await?;
 
+        sqlx::query(
+            r#"
+            INSERT INTO transcoding_jobs (
+                id,
+                processing_job_id,
+                video_id,
+                rendition,
+                segment_index,
+                source_segment_s3_key,
+                source_segment_duration_seconds,
+                attempt,
+                status,
+                correlation_id
+            )
+            VALUES (
+                $1,
+                $2,
+                $3,
+                '360p'::video_rendition_name,
+                0,
+                $4,
+                1.0,
+                1,
+                'QUEUED'::transcoding_job_status,
+                $5
+            )
+            ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
+            "#,
+        )
+        .bind(transcoding_job_id)
+        .bind(processing_job_id)
+        .bind(video_id)
+        .bind(
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT source_s3_key
+                FROM videos
+                WHERE id = $1
+                "#,
+            )
+            .bind(video_id)
+            .fetch_one(&mut *transaction)
+            .await?,
+        )
+        .bind(correlation_id)
+        .execute(&mut *transaction)
+        .await?;
+
         let finalized_upload = sqlx::query_as::<_, FinalizedUploadRecord>(
             r#"
             SELECT
                 v.id AS video_id,
                 v.public_id,
                 v.status::text AS video_status,
-                p.id AS processing_job_id
+                p.id AS processing_job_id,
+                tj.id AS transcoding_job_id
             FROM videos v
             INNER JOIN processing_jobs p
                 ON p.video_id = v.id
+            INNER JOIN transcoding_jobs tj
+                ON tj.processing_job_id = p.id
+               AND tj.rendition = '360p'::video_rendition_name
+               AND tj.segment_index = 0
             WHERE v.id = $1
               AND p.job_type = 'BASELINE'::processing_job_type
             ORDER BY p.attempt DESC
@@ -425,10 +479,15 @@ impl VideoRepository {
                 v.id AS video_id,
                 v.public_id,
                 v.status::text AS video_status,
-                p.id AS processing_job_id
+                p.id AS processing_job_id,
+                tj.id AS transcoding_job_id
             FROM videos v
             INNER JOIN processing_jobs p
                 ON p.video_id = v.id
+            INNER JOIN transcoding_jobs tj
+                ON tj.processing_job_id = p.id
+               AND tj.rendition = '360p'::video_rendition_name
+               AND tj.segment_index = 0
             WHERE v.id = $1
               AND p.job_type = 'BASELINE'::processing_job_type
             ORDER BY p.attempt DESC
@@ -494,6 +553,7 @@ pub struct FinalizedUploadRecord {
     pub public_id: String,
     pub video_status: String,
     pub processing_job_id: Uuid,
+    pub transcoding_job_id: Uuid,
 }
 
 #[derive(Debug, FromRow)]

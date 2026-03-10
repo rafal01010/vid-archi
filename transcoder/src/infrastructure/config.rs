@@ -9,6 +9,7 @@ pub struct TranscoderConfig {
     pub aws_region: String,
     pub upload_bucket: String,
     pub processed_bucket: String,
+    pub sqs_chunker_queue_url: String,
     pub sqs_transcoder_queue_url: String,
     pub sqs_transcoder_360p_queue_url: String,
     pub sqs_transcoder_480p_queue_url: String,
@@ -52,6 +53,7 @@ impl TranscoderConfig {
             "LOCAL_PROCESSED_BUCKET",
             "processed bucket",
         )?;
+        let sqs_chunker_queue_url = read_required_env("SQS_CHUNKER_QUEUE_URL")?;
         let sqs_transcoder_queue_url = read_required_env("SQS_TRANSCODER_QUEUE_URL")?;
         let sqs_transcoder_360p_queue_url = read_required_env("SQS_TRANSCODER_360P_QUEUE_URL")?;
         let sqs_transcoder_480p_queue_url = read_required_env("SQS_TRANSCODER_480P_QUEUE_URL")?;
@@ -106,6 +108,7 @@ impl TranscoderConfig {
             aws_region,
             upload_bucket,
             processed_bucket,
+            sqs_chunker_queue_url,
             sqs_transcoder_queue_url,
             sqs_transcoder_360p_queue_url,
             sqs_transcoder_480p_queue_url,
