@@ -11,9 +11,9 @@ use crate::infrastructure::message_queue::TranscoderJobMessage;
 use crate::infrastructure::object_storage::ObjectStorage;
 use crate::infrastructure::postgres::{
     ChunkerFailureDisposition, ChunkerRepository, ClaimedBaselineJob, QueuedTranscodingJobRecord,
-    SourceSegmentRecord,
+    ReadyRenditionSeed,
 };
-use crate::media::{PreparedSourceSegment, SourceProbe, SourceSegmenter};
+use crate::media::{PreparedIntermediateRendition, SourceProbe, SourceSegmenter};
 
 #[derive(Debug)]
 pub enum ChunkerProcessOutcome {
@@ -187,49 +187,67 @@ impl ChunkerRuntime {
 
         let source_metadata = self.source_probe.probe(&source_path).await?;
         let baseline_rendition = self.policy.baseline_rendition_name();
+        let highest_rendition = self
+            .policy
+            .highest_eligible_rendition_profile(source_metadata.width, source_metadata.height)
+            .ok_or_else(|| crate::error::AppError::internal("no eligible rendition for source"))?;
         let additional_renditions = self
             .policy
             .source_eligible_additional_renditions(source_metadata.width, source_metadata.height);
-        let prepared_segments = self
+        let intermediate_rendition = self
             .source_segmenter
-            .segment_source(
+            .build_intermediate_rendition(
                 &source_path,
-                &processing_directory.join("source").join("segments"),
+                &processing_directory.join("intermediate"),
+                &highest_rendition,
                 self.policy.source_segment_duration_seconds(),
-                source_metadata.rotation_degrees,
             )
             .await?;
         tracing::info!(
             source_width = source_metadata.width,
             source_height = source_metadata.height,
             baseline_rendition = %baseline_rendition,
+            highest_rendition = %highest_rendition.name,
             additional_rendition_count = additional_renditions.len(),
-            segment_count = prepared_segments.len(),
-            "prepared source media and split it into source segments"
+            segment_count = intermediate_rendition.segments.len(),
+            "prepared the highest eligible intermediate rendition from the uploaded source"
         );
 
         if !self.repository.video_exists(job.video_id).await? {
             tracing::info!(
                 job_id = %job.job_id,
                 video_id = %job.video_id,
-                "video was deleted after segment preparation; skipping source-segment upload"
+                "video was deleted after intermediate rendition preparation; skipping uploads"
             );
             return Ok(Vec::new());
         }
 
-        let source_segments = self
-            .upload_source_segments(job.video_id, &prepared_segments)
+        let intermediate_playlist_s3_key = self
+            .upload_intermediate_rendition(job.video_id, &intermediate_rendition)
             .await?;
+        let ready_rendition_seed = if intermediate_rendition.rendition_name != baseline_rendition {
+            Some(
+                self.publish_highest_ready_rendition(job.video_id, &intermediate_rendition)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         if !self.repository.video_exists(job.video_id).await? {
             tracing::info!(
                 job_id = %job.job_id,
                 video_id = %job.video_id,
-                "video was deleted after source-segment upload; skipping transcoder dispatch"
+                "video was deleted after intermediate rendition upload; skipping transcoder dispatch"
             );
             return Ok(Vec::new());
         }
 
+        let source_duration_seconds = intermediate_rendition
+            .segments
+            .iter()
+            .map(|segment| segment.duration_seconds)
+            .sum::<f64>();
         let queued_jobs = self
             .repository
             .dispatch_transcoding_jobs(
@@ -240,11 +258,13 @@ impl ChunkerRuntime {
                 source_metadata.height,
                 &baseline_rendition,
                 &additional_renditions,
-                &source_segments,
+                &intermediate_playlist_s3_key,
+                source_duration_seconds,
+                ready_rendition_seed.as_ref(),
                 job.attempt,
             )
             .await?;
-        tracing::info!(queued_job_count = queued_jobs.len(), "queued baseline and additional transcoding jobs");
+        tracing::info!(queued_job_count = queued_jobs.len(), "queued baseline and lower-rendition transcoding jobs");
 
         Ok(queued_jobs
             .into_iter()
@@ -252,34 +272,74 @@ impl ChunkerRuntime {
             .collect())
     }
 
-    async fn upload_source_segments(
+    async fn upload_intermediate_rendition(
         &self,
         video_id: Uuid,
-        prepared_segments: &[PreparedSourceSegment],
-    ) -> AppResult<Vec<SourceSegmentRecord>> {
-        let mut source_segments = Vec::with_capacity(prepared_segments.len());
+        rendition: &PreparedIntermediateRendition,
+    ) -> AppResult<String> {
+        let prefix = format!(
+            "videos/{video_id}/source/intermediate/{}/",
+            rendition.rendition_name
+        );
+        let playlist_key = format!("{prefix}{}.m3u8", rendition.rendition_name);
+        self.object_storage
+            .upload_source_playlist(&playlist_key, &rendition.variant_playlist_path)
+            .await?;
 
-        for segment in prepared_segments {
+        for segment in &rendition.segments {
             let object_key = format!(
-                "videos/{video_id}/source/segments/segment_{:05}.mkv",
+                "{prefix}segment_{:05}.ts",
                 segment.segment_index
             );
             self.object_storage
                 .upload_source_segment(&object_key, &segment.path)
                 .await?;
-            source_segments.push(SourceSegmentRecord {
-                segment_index: segment.segment_index,
-                source_segment_s3_key: object_key,
-                duration_seconds: segment.duration_seconds,
-            });
         }
 
-        Ok(source_segments)
+        Ok(playlist_key)
+    }
+
+    async fn publish_highest_ready_rendition(
+        &self,
+        video_id: Uuid,
+        rendition: &PreparedIntermediateRendition,
+    ) -> AppResult<ReadyRenditionSeed> {
+        let playlist_key = format!(
+            "videos/{video_id}/hls/{}/{}.m3u8",
+            rendition.rendition_name, rendition.rendition_name
+        );
+        self.object_storage
+            .upload_processed_file(
+                &playlist_key,
+                &rendition.variant_playlist_path,
+                "application/vnd.apple.mpegurl",
+            )
+            .await?;
+
+        for segment in &rendition.segments {
+            let object_key = format!(
+                "videos/{video_id}/hls/{}/segment_{:05}.ts",
+                rendition.rendition_name, segment.segment_index
+            );
+            self.object_storage
+                .upload_processed_file(&object_key, &segment.path, "video/mp2t")
+                .await?;
+        }
+
+        Ok(ReadyRenditionSeed {
+            rendition_name: rendition.rendition_name.clone(),
+            playlist_key,
+            output_width: rendition.width as i32,
+            output_height: rendition.height as i32,
+            target_video_bitrate_kbps: rendition.video_bitrate_kbps as i32,
+            target_audio_bitrate_kbps: rendition.audio_bitrate_kbps as i32,
+            segment_count: rendition.segments.len() as i32,
+        })
     }
 
     async fn prepare_processing_directory(&self, processing_directory: &PathBuf) -> AppResult<()> {
         tokio::fs::create_dir_all(processing_directory.join("source")).await?;
-        tokio::fs::create_dir_all(processing_directory.join("source").join("segments")).await?;
+        tokio::fs::create_dir_all(processing_directory.join("intermediate")).await?;
         Ok(())
     }
 

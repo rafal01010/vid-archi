@@ -121,7 +121,9 @@ impl ChunkerRepository {
         source_height: u32,
         baseline_rendition_name: &str,
         additional_rendition_names: &[String],
-        source_segments: &[SourceSegmentRecord],
+        intermediate_playlist_s3_key: &str,
+        source_duration_seconds: f64,
+        ready_rendition: Option<&ReadyRenditionSeed>,
         attempt: i32,
     ) -> AppResult<Vec<QueuedTranscodingJobRecord>> {
         let mut transaction = self.pool.begin().await?;
@@ -141,7 +143,7 @@ impl ChunkerRepository {
         .execute(&mut *transaction)
         .await?;
 
-        for source_segment in source_segments {
+        if baseline_rendition_name != ready_rendition.map(|value| value.rendition_name.as_str()).unwrap_or("") {
             sqlx::query(
                 r#"
                 INSERT INTO transcoding_jobs (
@@ -161,12 +163,12 @@ impl ChunkerRepository {
                     $2,
                     $3,
                     $4::video_rendition_name,
+                    0,
                     $5,
                     $6,
                     $7,
-                    $8,
                     'QUEUED'::transcoding_job_status,
-                    $9
+                    $8
                 )
                 ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
                 "#,
@@ -175,9 +177,8 @@ impl ChunkerRepository {
             .bind(processing_job_id)
             .bind(video_id)
             .bind(baseline_rendition_name)
-            .bind(source_segment.segment_index)
-            .bind(&source_segment.source_segment_s3_key)
-            .bind(source_segment.duration_seconds)
+            .bind(intermediate_playlist_s3_key)
+            .bind(source_duration_seconds)
             .bind(attempt)
             .bind(correlation_id)
             .execute(&mut *transaction)
@@ -229,48 +230,99 @@ impl ChunkerRepository {
             .await?;
 
             for rendition_name in additional_rendition_names {
-                for source_segment in source_segments {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO transcoding_jobs (
-                            id,
-                            processing_job_id,
-                            video_id,
-                            rendition,
-                            segment_index,
-                            source_segment_s3_key,
-                            source_segment_duration_seconds,
-                            attempt,
-                            status,
-                            correlation_id
-                        )
-                        VALUES (
-                            $1,
-                            $2,
-                            $3,
-                            $4::video_rendition_name,
-                            $5,
-                            $6,
-                            $7,
-                            1,
-                            'QUEUED'::transcoding_job_status,
-                            $8
-                        )
-                        ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
-                        "#,
+                sqlx::query(
+                    r#"
+                    INSERT INTO transcoding_jobs (
+                        id,
+                        processing_job_id,
+                        video_id,
+                        rendition,
+                        segment_index,
+                        source_segment_s3_key,
+                        source_segment_duration_seconds,
+                        attempt,
+                        status,
+                        correlation_id
                     )
-                    .bind(Uuid::new_v4())
-                    .bind(queued_additional_job_id)
-                    .bind(video_id)
-                    .bind(rendition_name)
-                    .bind(source_segment.segment_index)
-                    .bind(&source_segment.source_segment_s3_key)
-                    .bind(source_segment.duration_seconds)
-                    .bind(correlation_id)
-                    .execute(&mut *transaction)
-                    .await?;
-                }
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4::video_rendition_name,
+                        0,
+                        $5,
+                        $6,
+                        1,
+                        'QUEUED'::transcoding_job_status,
+                        $7
+                    )
+                    ON CONFLICT (video_id, rendition, segment_index, attempt) DO NOTHING
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(queued_additional_job_id)
+                .bind(video_id)
+                .bind(rendition_name)
+                .bind(intermediate_playlist_s3_key)
+                .bind(source_duration_seconds)
+                .bind(correlation_id)
+                .execute(&mut *transaction)
+                .await?;
             }
+        }
+
+        if let Some(ready_rendition) = ready_rendition {
+            sqlx::query(
+                r#"
+                INSERT INTO video_renditions (
+                    video_id,
+                    rendition,
+                    codec,
+                    container,
+                    playlist_key,
+                    output_width,
+                    output_height,
+                    target_video_bitrate_kbps,
+                    target_audio_bitrate_kbps,
+                    status,
+                    segment_count
+                )
+                VALUES (
+                    $1,
+                    $2::video_rendition_name,
+                    'h264',
+                    'mpegts',
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    $7,
+                    'READY'::video_rendition_status,
+                    $8
+                )
+                ON CONFLICT (video_id, rendition) DO UPDATE
+                SET codec = EXCLUDED.codec,
+                    container = EXCLUDED.container,
+                    playlist_key = EXCLUDED.playlist_key,
+                    output_width = EXCLUDED.output_width,
+                    output_height = EXCLUDED.output_height,
+                    target_video_bitrate_kbps = EXCLUDED.target_video_bitrate_kbps,
+                    target_audio_bitrate_kbps = EXCLUDED.target_audio_bitrate_kbps,
+                    status = 'READY'::video_rendition_status,
+                    segment_count = EXCLUDED.segment_count,
+                    updated_at = NOW()
+                "#,
+            )
+            .bind(video_id)
+            .bind(&ready_rendition.rendition_name)
+            .bind(&ready_rendition.playlist_key)
+            .bind(ready_rendition.output_width)
+            .bind(ready_rendition.output_height)
+            .bind(ready_rendition.target_video_bitrate_kbps)
+            .bind(ready_rendition.target_audio_bitrate_kbps)
+            .bind(ready_rendition.segment_count)
+            .execute(&mut *transaction)
+            .await?;
         }
 
         let baseline_jobs = sqlx::query_as::<_, QueuedTranscodingJobRecord>(
@@ -287,6 +339,7 @@ impl ChunkerRepository {
             WHERE video_id = $1
               AND processing_job_id = $2
               AND rendition = $3::video_rendition_name
+              AND segment_index = 0
               AND attempt = $4
             ORDER BY segment_index ASC
             "#,
@@ -453,10 +506,14 @@ pub struct ClaimedBaselineJob {
 }
 
 #[derive(Debug, Clone)]
-pub struct SourceSegmentRecord {
-    pub segment_index: i32,
-    pub source_segment_s3_key: String,
-    pub duration_seconds: f64,
+pub struct ReadyRenditionSeed {
+    pub rendition_name: String,
+    pub playlist_key: String,
+    pub output_width: i32,
+    pub output_height: i32,
+    pub target_video_bitrate_kbps: i32,
+    pub target_audio_bitrate_kbps: i32,
+    pub segment_count: i32,
 }
 
 #[derive(Debug)]

@@ -139,6 +139,137 @@ impl MediaProcessor {
         probe_duration_seconds(&self.ffprobe_binary, source_path, "media duration").await
     }
 
+    pub async fn transcode_playlist_to_rendition(
+        &self,
+        source_playlist_path: &Path,
+        output_root: &Path,
+        profile: &RenditionProfile,
+        source_width: u32,
+        source_height: u32,
+    ) -> AppResult<TranscodedRendition> {
+        let scaled_resolution =
+            compute_scaled_resolution(source_width, source_height, profile.width, profile.height)?;
+        let rendition_directory = output_root.join(&profile.name);
+        tokio::fs::create_dir_all(&rendition_directory).await?;
+        let variant_playlist_path = rendition_directory.join(&profile.variant_playlist_file_name);
+        let segment_pattern = rendition_directory.join("segment_%05d.ts");
+        let gop = profile
+            .max_frame_rate
+            .saturating_mul(profile.segment_duration_seconds);
+
+        let ffmpeg_binary = self.ffmpeg_binary.clone();
+        let source_playlist_path = source_playlist_path.to_path_buf();
+        let variant_playlist_path_for_command = variant_playlist_path.clone();
+        let segment_pattern_for_command = segment_pattern.clone();
+        let max_frame_rate = profile.max_frame_rate;
+        let video_bitrate_kbps = profile.video_bitrate_kbps;
+        let audio_bitrate_kbps = profile.audio_bitrate_kbps;
+        let segment_duration_seconds = profile.segment_duration_seconds;
+        let scale_filter = format!(
+            "scale=w={}:h={}:force_original_aspect_ratio=decrease",
+            scaled_resolution.width, scaled_resolution.height
+        );
+        let ffmpeg_output = task::spawn_blocking(move || {
+            std::process::Command::new(ffmpeg_binary)
+                .arg("-y")
+                .arg("-allowed_extensions")
+                .arg("ALL")
+                .arg("-protocol_whitelist")
+                .arg("file,pipe,data")
+                .arg("-i")
+                .arg(source_playlist_path)
+                .arg("-vf")
+                .arg(scale_filter)
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("veryfast")
+                .arg("-profile:v")
+                .arg("main")
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-r")
+                .arg(max_frame_rate.to_string())
+                .arg("-g")
+                .arg(gop.to_string())
+                .arg("-keyint_min")
+                .arg(gop.to_string())
+                .arg("-sc_threshold")
+                .arg("0")
+                .arg("-b:v")
+                .arg(format!("{video_bitrate_kbps}k"))
+                .arg("-maxrate")
+                .arg(format!("{}k", video_bitrate_kbps + 80))
+                .arg("-bufsize")
+                .arg(format!("{}k", video_bitrate_kbps * 2))
+                .arg("-c:a")
+                .arg("aac")
+                .arg("-b:a")
+                .arg(format!("{audio_bitrate_kbps}k"))
+                .arg("-ar")
+                .arg("48000")
+                .arg("-ac")
+                .arg("2")
+                .arg("-f")
+                .arg("hls")
+                .arg("-hls_time")
+                .arg(segment_duration_seconds.to_string())
+                .arg("-hls_playlist_type")
+                .arg("vod")
+                .arg("-hls_segment_filename")
+                .arg(segment_pattern_for_command)
+                .arg("-hls_flags")
+                .arg("independent_segments")
+                .arg(variant_playlist_path_for_command)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+        })
+        .await
+        .map_err(|error| {
+            AppError::internal_with_context("failed to join ffmpeg playlist task", error.to_string())
+        })??;
+
+        if !ffmpeg_output.status.success() {
+            return Err(AppError::internal_with_context(
+                "ffmpeg failed to transcode the intermediate playlist into a rendition",
+                String::from_utf8_lossy(&ffmpeg_output.stderr),
+            ));
+        }
+
+        let mut entries = tokio::fs::read_dir(&rendition_directory).await?;
+        let mut segment_count = 0_i32;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let is_ts = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("ts"))
+                .unwrap_or(false);
+            if is_ts {
+                segment_count += 1;
+            }
+        }
+
+        if tokio::fs::metadata(&variant_playlist_path).await.is_err() || segment_count == 0 {
+            return Err(AppError::internal(
+                "ffmpeg completed without producing rendition playlist artifacts",
+            ));
+        }
+
+        Ok(TranscodedRendition {
+            rendition: profile.name.clone(),
+            codec: profile.video_codec.clone(),
+            container: profile.segment_container.clone(),
+            variant_playlist_file_name: profile.variant_playlist_file_name.clone(),
+            output_width: scaled_resolution.width,
+            output_height: scaled_resolution.height,
+            target_video_bitrate_kbps: profile.video_bitrate_kbps,
+            target_audio_bitrate_kbps: profile.audio_bitrate_kbps,
+            segment_count,
+        })
+    }
+
     async fn probe_source_rotation_degrees(&self, source_path: &Path) -> AppResult<i32> {
         let ffprobe_binary = self.ffprobe_binary.clone();
         let source_path_for_command = source_path.to_path_buf();
@@ -335,6 +466,19 @@ pub struct TranscodedSegment {
     pub output_height: u32,
     pub target_video_bitrate_kbps: u32,
     pub target_audio_bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscodedRendition {
+    pub rendition: String,
+    pub codec: String,
+    pub container: String,
+    pub variant_playlist_file_name: String,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub target_video_bitrate_kbps: u32,
+    pub target_audio_bitrate_kbps: u32,
+    pub segment_count: i32,
 }
 
 #[cfg(test)]

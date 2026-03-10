@@ -15,6 +15,7 @@ use crate::infrastructure::config::ChunkerConfig;
 pub struct ObjectStorage {
     client: Client,
     upload_bucket: String,
+    processed_bucket: String,
 }
 
 impl ObjectStorage {
@@ -51,6 +52,7 @@ impl ObjectStorage {
         Ok(Self {
             client: Client::from_conf(s3_config_builder.build()),
             upload_bucket: config.upload_bucket.clone(),
+            processed_bucket: config.processed_bucket.clone(),
         })
     }
 
@@ -89,9 +91,40 @@ impl ObjectStorage {
     }
 
     pub async fn upload_source_segment(&self, object_key: &str, local_path: &Path) -> AppResult<()> {
+        self.upload_file(&self.upload_bucket, object_key, local_path, "video/mp2t")
+            .await
+    }
+
+    pub async fn upload_source_playlist(&self, object_key: &str, local_path: &Path) -> AppResult<()> {
+        self.upload_file(
+            &self.upload_bucket,
+            object_key,
+            local_path,
+            "application/vnd.apple.mpegurl",
+        )
+        .await
+    }
+
+    pub async fn upload_processed_file(
+        &self,
+        object_key: &str,
+        local_path: &Path,
+        content_type: &str,
+    ) -> AppResult<()> {
+        self.upload_file(&self.processed_bucket, object_key, local_path, content_type)
+            .await
+    }
+
+    async fn upload_file(
+        &self,
+        bucket: &str,
+        object_key: &str,
+        local_path: &Path,
+        content_type: &str,
+    ) -> AppResult<()> {
         let file_bytes = tokio::fs::read(local_path).await.map_err(|error| {
             AppError::internal_with_context(
-                "failed to read generated source segment before upload",
+                "failed to read generated artifact before upload",
                 format!("file={} error={error}", local_path.display()),
             )
         })?;
@@ -99,19 +132,19 @@ impl ObjectStorage {
 
         self.client
             .put_object()
-            .bucket(&self.upload_bucket)
+            .bucket(bucket)
             .key(object_key)
-            .content_type("video/x-matroska")
+            .content_type(content_type)
             .content_length(file_size_bytes)
             .body(ByteStream::from(file_bytes))
             .send()
             .await
             .map_err(|error| {
                 AppError::internal_with_context(
-                    "failed to upload generated source segment",
+                    "failed to upload generated artifact",
                     format!(
                         "bucket={} key={} file={} error={error}",
-                        self.upload_bucket,
+                        bucket,
                         object_key,
                         local_path.display()
                     ),

@@ -85,6 +85,61 @@ impl ObjectStorage {
             .await
     }
 
+    pub async fn download_upload_prefix(
+        &self,
+        prefix: &str,
+        destination_root: &Path,
+    ) -> AppResult<()> {
+        tokio::fs::create_dir_all(destination_root).await?;
+        let mut continuation_token = None;
+
+        loop {
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.upload_bucket)
+                .prefix(prefix);
+
+            if let Some(token) = &continuation_token {
+                request = request.continuation_token(token);
+            }
+
+            let response = request.send().await.map_err(|error| {
+                AppError::internal_with_context(
+                    "failed to list intermediate upload artifacts",
+                    format!(
+                        "bucket={} prefix={} error={error}",
+                        self.upload_bucket, prefix
+                    ),
+                )
+            })?;
+
+            for object in response.contents() {
+                let Some(object_key) = object.key() else {
+                    continue;
+                };
+                if object_key.ends_with('/') {
+                    continue;
+                }
+
+                let relative_path = object_key.strip_prefix(prefix).unwrap_or(object_key);
+                let destination = destination_root.join(relative_path);
+                self.download_object(&self.upload_bucket, object_key, &destination, "intermediate upload artifact")
+                    .await?;
+            }
+
+            if response.is_truncated().unwrap_or(false) {
+                continuation_token = response
+                    .next_continuation_token()
+                    .map(|value| value.to_owned());
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn download_object(
         &self,
         bucket: &str,

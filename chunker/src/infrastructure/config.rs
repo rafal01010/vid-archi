@@ -8,6 +8,7 @@ pub struct ChunkerConfig {
     pub database_url: String,
     pub aws_region: String,
     pub upload_bucket: String,
+    pub processed_bucket: String,
     pub sqs_chunker_queue_url: String,
     pub sqs_transcoder_360p_queue_url: String,
     pub sqs_transcoder_480p_queue_url: String,
@@ -44,6 +45,8 @@ impl ChunkerConfig {
         let aws_region = env::var("AWS_REGION").unwrap_or_else(|_| "ap-northeast-1".to_owned());
         let upload_bucket =
             read_bucket_name("UPLOAD_BUCKET", "LOCAL_UPLOAD_BUCKET", "upload bucket")?;
+        let processed_bucket =
+            read_bucket_name("PROCESSED_BUCKET", "LOCAL_PROCESSED_BUCKET", "processed bucket")?;
         let sqs_chunker_queue_url = read_required_env("SQS_CHUNKER_QUEUE_URL")?;
         let sqs_transcoder_360p_queue_url = read_required_env("SQS_TRANSCODER_360P_QUEUE_URL")?;
         let sqs_transcoder_480p_queue_url = read_required_env("SQS_TRANSCODER_480P_QUEUE_URL")?;
@@ -88,6 +91,7 @@ impl ChunkerConfig {
             database_url,
             aws_region,
             upload_bucket,
+            processed_bucket,
             sqs_chunker_queue_url,
             sqs_transcoder_360p_queue_url,
             sqs_transcoder_480p_queue_url,
