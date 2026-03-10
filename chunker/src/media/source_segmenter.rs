@@ -28,60 +28,84 @@ impl SourceSegmenter {
         _source_rotation_degrees: i32,
     ) -> AppResult<Vec<PreparedSourceSegment>> {
         tokio::fs::create_dir_all(output_directory).await?;
+        let total_duration_seconds = self.probe_duration_seconds(source_path).await?;
+        let segment_duration_seconds = segment_duration_seconds as f64;
+        let mut segments = Vec::new();
+        let mut segment_start_seconds = 0.0;
+        let mut segment_index = 0_i32;
 
-        let ffmpeg_output = self
-            .segment_source_into_intermediate_chunks(
-                source_path,
-                output_directory,
-                segment_duration_seconds,
-            )
-            .await?;
+        while segment_start_seconds < total_duration_seconds {
+            let requested_duration_seconds =
+                (total_duration_seconds - segment_start_seconds).min(segment_duration_seconds);
+            let output_path = output_directory.join(format!("segment_{segment_index:05}.mkv"));
+            let ffmpeg_output = self
+                .create_independent_source_segment(
+                    source_path,
+                    &output_path,
+                    segment_start_seconds,
+                    requested_duration_seconds,
+                )
+                .await?;
 
-        if !ffmpeg_output.status.success() {
-            return Err(AppError::internal_with_context(
-                "ffmpeg failed to split the uploaded source video into segments",
-                String::from_utf8_lossy(&ffmpeg_output.stderr),
-            ));
+            if !ffmpeg_output.status.success() {
+                return Err(AppError::internal_with_context(
+                    "ffmpeg failed to split the uploaded source video into segments",
+                    String::from_utf8_lossy(&ffmpeg_output.stderr),
+                ));
+            }
+
+            if tokio::fs::metadata(&output_path).await.is_err() {
+                return Err(AppError::internal(
+                    "ffmpeg completed without producing a source segment",
+                ));
+            }
+
+            let duration_seconds = self.probe_duration_seconds(&output_path).await?;
+            segments.push(PreparedSourceSegment {
+                segment_index,
+                path: output_path,
+                duration_seconds,
+            });
+
+            segment_start_seconds += segment_duration_seconds;
+            segment_index += 1;
         }
 
-        let mut segment_paths = collect_segment_paths(output_directory).await?;
-        segment_paths.sort();
-
-        if segment_paths.is_empty() {
+        if segments.is_empty() {
             return Err(AppError::internal(
                 "ffmpeg completed without producing source segments",
             ));
         }
 
-        let mut segments = Vec::with_capacity(segment_paths.len());
-        for (segment_index, path) in segment_paths.into_iter().enumerate() {
-            let duration_seconds = self.probe_duration_seconds(&path).await?;
-            segments.push(PreparedSourceSegment {
-                segment_index: segment_index as i32,
-                path,
-                duration_seconds,
-            });
-        }
-
         Ok(segments)
     }
 
-    async fn segment_source_into_intermediate_chunks(
+    async fn create_independent_source_segment(
         &self,
         source_path: &Path,
-        output_directory: &Path,
-        segment_duration_seconds: u32,
+        output_path: &Path,
+        segment_start_seconds: f64,
+        segment_duration_seconds: f64,
     ) -> AppResult<std::process::Output> {
         let ffmpeg_binary = self.ffmpeg_binary.clone();
         let source_path_for_command = source_path.to_path_buf();
-        let output_pattern = output_directory.join("segment_%05d.mkv");
+        let output_path_for_command = output_path.to_path_buf();
 
         task::spawn_blocking(move || {
             std::process::Command::new(ffmpeg_binary)
                 .arg("-y")
-                .arg("-noautorotate")
                 .arg("-i")
                 .arg(source_path_for_command)
+                .arg("-ss")
+                .arg(format!("{segment_start_seconds:.3}"))
+                .arg("-t")
+                .arg(format!("{segment_duration_seconds:.3}"))
+                .arg("-map")
+                .arg("0:v:0")
+                .arg("-map")
+                .arg("0:a?")
+                .arg("-map_metadata")
+                .arg("-1")
                 .arg("-c:v")
                 .arg("libx264")
                 .arg("-preset")
@@ -92,8 +116,6 @@ impl SourceSegmenter {
                 .arg("yuv420p")
                 .arg("-sc_threshold")
                 .arg("0")
-                .arg("-force_key_frames")
-                .arg(format!("expr:gte(t,n_forced*{segment_duration_seconds})"))
                 .arg("-x264-params")
                 .arg("open-gop=0")
                 .arg("-c:a")
@@ -104,13 +126,11 @@ impl SourceSegmenter {
                 .arg("48000")
                 .arg("-ac")
                 .arg("2")
-                .arg("-f")
-                .arg("segment")
-                .arg("-segment_time")
-                .arg(segment_duration_seconds.to_string())
-                .arg("-reset_timestamps")
-                .arg("1")
-                .arg(output_pattern)
+                .arg("-metadata:s:v:0")
+                .arg("rotate=0")
+                .arg("-avoid_negative_ts")
+                .arg("make_zero")
+                .arg(output_path_for_command)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .output()
@@ -169,26 +189,6 @@ impl SourceSegmenter {
 
         Ok(duration_seconds)
     }
-}
-
-async fn collect_segment_paths(output_directory: &Path) -> AppResult<Vec<PathBuf>> {
-    let mut entries = tokio::fs::read_dir(output_directory).await?;
-    let mut segment_paths = Vec::new();
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        let is_segment = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.eq_ignore_ascii_case("mkv"))
-            .unwrap_or(false);
-
-        if is_segment {
-            segment_paths.push(path);
-        }
-    }
-
-    Ok(segment_paths)
 }
 
 #[derive(Debug, Clone)]
