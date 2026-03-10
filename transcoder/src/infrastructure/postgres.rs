@@ -35,6 +35,22 @@ impl TranscoderRepository {
             .await
     }
 
+    pub async fn video_exists(&self, video_id: Uuid) -> AppResult<bool> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM videos
+                WHERE id = $1
+            )
+            "#,
+        )
+        .bind(video_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
     async fn claim_baseline_transcoding_job(
         &self,
         transcoding_job_id: Uuid,

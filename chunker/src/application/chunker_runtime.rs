@@ -173,6 +173,7 @@ impl ChunkerRuntime {
                 &source_path,
                 &processing_directory.join("source").join("segments"),
                 self.policy.source_segment_duration_seconds(),
+                source_metadata.rotation_degrees,
             )
             .await?;
         tracing::info!(

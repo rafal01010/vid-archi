@@ -123,9 +123,9 @@ fn normalize_delete_code(delete_code: String) -> AppResult<String> {
 }
 
 fn reject_delete_for_active_processing(status: &str) -> AppResult<()> {
-    if matches!(status, "PROCESSING_BASELINE" | "PROCESSING_FULL") {
+    if matches!(status, "PROCESSING_BASELINE") {
         return Err(AppError::conflict(
-            "video is actively processing; try deleting it again after processing finishes",
+            "video is still preparing its first playable stream; try deleting it again after playback becomes available",
         ));
     }
 
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn reject_delete_for_active_processing_blocks_processing_states() {
-        let result = reject_delete_for_active_processing("PROCESSING_FULL");
+        let result = reject_delete_for_active_processing("PROCESSING_BASELINE");
 
         assert!(result.is_err());
     }
@@ -179,6 +179,13 @@ mod tests {
     #[test]
     fn reject_delete_for_active_processing_allows_ready_state() {
         let result = reject_delete_for_active_processing("READY");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reject_delete_for_active_processing_allows_processing_full_state() {
+        let result = reject_delete_for_active_processing("PROCESSING_FULL");
 
         assert!(result.is_ok());
     }

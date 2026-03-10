@@ -135,6 +135,13 @@ impl TranscoderRuntime {
             .prepare_processing_directory(&processing_directory)
             .await
         {
+            if !self.repository.video_exists(job.video_id).await? {
+                self.cleanup_processing_directory(&processing_directory);
+                return Ok(TranscoderProcessOutcome::Ignored {
+                    transcoding_job_id: job.transcoding_job_id,
+                });
+            }
+
             let failure = self
                 .repository
                 .mark_transcoding_failed(
@@ -181,6 +188,19 @@ impl TranscoderRuntime {
                 follow_up_jobs,
             }),
             Err(error) => {
+                if !self.repository.video_exists(job.video_id).await? {
+                    tracing::info!(
+                        video_id = %job.video_id,
+                        transcoding_job_id = %job.transcoding_job_id,
+                        rendition = %job.rendition,
+                        segment_index = job.segment_index,
+                        "video was deleted while the segment job was running; ignoring failure"
+                    );
+                    return Ok(TranscoderProcessOutcome::Ignored {
+                        transcoding_job_id: job.transcoding_job_id,
+                    });
+                }
+
                 let failure = self
                     .repository
                     .mark_transcoding_failed(
@@ -268,6 +288,17 @@ impl TranscoderRuntime {
             output_height = transcoded_segment.output_height,
             "transcoded rendition segment"
         );
+
+        if !self.repository.video_exists(job.video_id).await? {
+            tracing::info!(
+                video_id = %job.video_id,
+                transcoding_job_id = %job.transcoding_job_id,
+                rendition = %job.rendition,
+                segment_index = job.segment_index,
+                "video was deleted while the segment was transcoding; skipping artifact upload"
+            );
+            return Ok(Vec::new());
+        }
 
         let playlist_key = format!(
             "videos/{}/hls/{}/{}",
@@ -399,29 +430,24 @@ impl TranscoderRuntime {
                 )
                 .await?;
 
-            if self.policy.is_baseline_rendition(&job.rendition) {
-                let queued_jobs = self
-                    .repository
-                    .list_queued_additional_transcoding_jobs(job.video_id)
-                    .await?;
-                return Ok((
-                    queued_jobs
-                        .into_iter()
-                        .map(map_queued_job_to_message)
-                        .collect(),
-                    should_cleanup_source_segments,
-                ));
-            }
-
             Ok((Vec::new(), should_cleanup_source_segments))
         }
         .await;
 
         match completion_result {
-            Ok((follow_up_jobs, should_cleanup_source_segments)) => {
+            Ok((mut follow_up_jobs, should_cleanup_source_segments)) => {
                 self.repository
                     .commit_video_completion_session(completion_session)
                     .await?;
+
+                let queued_jobs = self
+                    .repository
+                    .list_queued_additional_transcoding_jobs(job.video_id)
+                    .await?;
+                if !queued_jobs.is_empty() {
+                    follow_up_jobs.extend(queued_jobs.into_iter().map(map_queued_job_to_message));
+                }
+
                 if should_cleanup_source_segments {
                     let prefix = format!("videos/{}/source/segments/", job.video_id);
                     match self.object_storage.delete_upload_prefix(&prefix).await {

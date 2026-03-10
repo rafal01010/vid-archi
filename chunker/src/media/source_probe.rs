@@ -70,6 +70,7 @@ impl SourceProbe {
 pub struct ProbedSourceVideo {
     pub width: u32,
     pub height: u32,
+    pub rotation_degrees: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,7 +106,27 @@ fn normalize_source_dimensions(stream: &ProbeStream) -> AppResult<ProbedSourceVi
         .height
         .ok_or_else(|| AppError::internal("ffprobe did not return source height"))?;
 
-    let rotation_degrees = stream
+    let rotation_degrees = source_rotation_degrees(stream);
+
+    let requires_swap = rotation_degrees.rem_euclid(180) != 0;
+
+    if requires_swap {
+        return Ok(ProbedSourceVideo {
+            width: height,
+            height: width,
+            rotation_degrees,
+        });
+    }
+
+    Ok(ProbedSourceVideo {
+        width,
+        height,
+        rotation_degrees,
+    })
+}
+
+fn source_rotation_degrees(stream: &ProbeStream) -> i32 {
+    stream
         .side_data_list
         .iter()
         .find_map(|side_data| side_data.rotation)
@@ -116,18 +137,7 @@ fn normalize_source_dimensions(stream: &ProbeStream) -> AppResult<ProbedSourceVi
                 .and_then(|tags| tags.rotate.as_deref())
                 .and_then(|value| value.parse::<i32>().ok())
         })
-        .unwrap_or(0);
-
-    let requires_swap = rotation_degrees.rem_euclid(180) != 0;
-
-    if requires_swap {
-        return Ok(ProbedSourceVideo {
-            width: height,
-            height: width,
-        });
-    }
-
-    Ok(ProbedSourceVideo { width, height })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -147,8 +157,14 @@ mod tests {
 
         let video = normalize_source_dimensions(&stream).expect("normalized dimensions");
 
-        assert_eq!(video.width, 3840);
-        assert_eq!(video.height, 2160);
+        assert_eq!(
+            video,
+            ProbedSourceVideo {
+                width: 3840,
+                height: 2160,
+                rotation_degrees: 0,
+            }
+        );
     }
 
     #[test]
@@ -169,6 +185,7 @@ mod tests {
             ProbedSourceVideo {
                 width: 2160,
                 height: 3840,
+                rotation_degrees: 90,
             }
         );
     }
@@ -191,6 +208,7 @@ mod tests {
             ProbedSourceVideo {
                 width: 1080,
                 height: 1920,
+                rotation_degrees: -90,
             }
         );
     }
