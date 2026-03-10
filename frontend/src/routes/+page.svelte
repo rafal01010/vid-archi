@@ -50,6 +50,10 @@
 		await loadRecentVideos(1);
 	}
 
+	async function handleUploadCancelled() {
+		await loadRecentVideos(1);
+	}
+
 	async function handleVideoDeleted() {
 		await loadRecentVideos(1);
 	}
@@ -72,7 +76,7 @@
 </script>
 
 <div class="page-shell home-page">
-	<UploadPanel on:uploadcompleted={handleUploadCompleted} />
+	<UploadPanel on:uploadcompleted={handleUploadCompleted} on:uploadcancelled={handleUploadCancelled} />
 
 	<VideoLibrary
 		{videos}

@@ -1,6 +1,6 @@
 <script>
 	import { createEventDispatcher } from 'svelte';
-	import { createVideoUpload } from '$lib/api';
+	import { createVideoUpload, deleteVideo } from '$lib/api';
 	import { formatBytes } from '$lib/formatters';
 	import {
 		ALLOWED_VIDEO_EXTENSIONS,
@@ -21,6 +21,7 @@
 	let uploadErrorMessage = '';
 	let sharePath = '';
 	let uploadController = null;
+	let cancelRequestedDuringPreparation = false;
 
 	$: isUploading = ['preparing', 'uploading', 'completing'].includes(uploadPhase);
 	$: canCancelUpload = ['preparing', 'uploading'].includes(uploadPhase);
@@ -66,6 +67,7 @@
 		uploadBytesTransferred = 0;
 		uploadErrorMessage = '';
 		sharePath = '';
+		cancelRequestedDuringPreparation = false;
 	}
 
 	async function handleUploadStarted() {
@@ -89,7 +91,9 @@
 		uploadErrorMessage = '';
 		sharePath = '';
 		uploadPhase = 'preparing';
-		uploadController = new AbortController();
+		cancelRequestedDuringPreparation = false;
+		const normalizedDeleteCode = deleteCode.trim();
+		let createdVideoPublicId = '';
 
 		try {
 			const createResponse = await createVideoUpload({
@@ -97,10 +101,20 @@
 				contentType: selectedFile.type || inferContentType(selectedFile.name),
 				sizeBytes: selectedFile.size,
 				title: title.trim() || null,
-				deleteCode: deleteCode.trim()
-			}, { signal: uploadController.signal });
+				deleteCode: normalizedDeleteCode
+			});
+			createdVideoPublicId = createResponse.publicId;
+
+			if (cancelRequestedDuringPreparation) {
+				await cleanupCancelledUpload(createdVideoPublicId, normalizedDeleteCode);
+				uploadPhase = 'cancelled';
+				uploadErrorMessage = 'Upload cancelled.';
+				dispatch('uploadcancelled');
+				return;
+			}
 
 			uploadPhase = 'uploading';
+			uploadController = new AbortController();
 			const completeResponse = await uploadMultipartVideo({
 				file: selectedFile,
 				createResponse,
@@ -123,9 +137,13 @@
 			});
 		} catch (error) {
 			if (isUploadCancelledError(error)) {
+				if (createdVideoPublicId) {
+					await cleanupCancelledUpload(createdVideoPublicId, normalizedDeleteCode);
+				}
+
 				uploadPhase = 'cancelled';
-				uploadErrorMessage =
-					'Upload cancelled. Any incomplete multipart parts will expire through the S3 lifecycle rule.';
+				uploadErrorMessage = 'Upload cancelled.';
+				dispatch('uploadcancelled');
 				return;
 			}
 
@@ -133,11 +151,26 @@
 			uploadErrorMessage = error instanceof Error ? error.message : 'Upload failed';
 		} finally {
 			uploadController = null;
+			cancelRequestedDuringPreparation = false;
 		}
 	}
 
 	function handleUploadCancelled() {
+		if (uploadPhase === 'preparing') {
+			cancelRequestedDuringPreparation = true;
+			uploadErrorMessage = 'Cancelling upload...';
+			return;
+		}
+
 		uploadController?.abort();
+	}
+
+	async function cleanupCancelledUpload(publicId, normalizedDeleteCode) {
+		try {
+			await deleteVideo(publicId, { deleteCode: normalizedDeleteCode });
+		} catch (error) {
+			console.warn('Failed to delete cancelled upload', error);
+		}
 	}
 
 	function validateSelectedFile(file) {
