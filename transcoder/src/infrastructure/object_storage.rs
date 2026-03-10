@@ -72,6 +72,26 @@ impl ObjectStorage {
         object_key: &str,
         destination: &Path,
     ) -> AppResult<()> {
+        self.download_object(&self.upload_bucket, object_key, destination, "source object")
+            .await
+    }
+
+    pub async fn download_processed_object(
+        &self,
+        object_key: &str,
+        destination: &Path,
+    ) -> AppResult<()> {
+        self.download_object(&self.processed_bucket, object_key, destination, "processed object")
+            .await
+    }
+
+    async fn download_object(
+        &self,
+        bucket: &str,
+        object_key: &str,
+        destination: &Path,
+        object_label: &str,
+    ) -> AppResult<()> {
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -79,17 +99,14 @@ impl ObjectStorage {
         let response = self
             .client
             .get_object()
-            .bucket(&self.upload_bucket)
+            .bucket(bucket)
             .key(object_key)
             .send()
             .await
             .map_err(|error| {
                 AppError::internal_with_context(
-                    "failed to download source object",
-                    format!(
-                        "bucket={} key={} error={error}",
-                        self.upload_bucket, object_key
-                    ),
+                    format!("failed to download {object_label}"),
+                    format!("bucket={} key={} error={error}", bucket, object_key),
                 )
             })?;
 

@@ -358,11 +358,16 @@ impl TranscoderRuntime {
                 return Ok((Vec::new(), false));
             }
 
-            let variant_playlist_segments = self.build_variant_playlist_segments(
-                job.video_id,
-                &job.rendition,
-                &latest_segment_states,
-            )?;
+            let variant_playlist_segments = self
+                .build_variant_playlist_segments(
+                    processing_directory,
+                    job.video_id,
+                    &job.rendition,
+                    &latest_segment_states,
+                    &output_segment_key,
+                    &output_segment_path,
+                )
+                .await?;
             let variant_playlist_key = playlist_key.clone();
             let variant_playlist_path = self
                 .write_variant_playlist(
@@ -486,24 +491,44 @@ impl TranscoderRuntime {
         }
     }
 
-    fn build_variant_playlist_segments(
+    async fn build_variant_playlist_segments(
         &self,
+        processing_directory: &PathBuf,
         video_id: uuid::Uuid,
         rendition: &str,
         latest_segment_states: &[LatestSegmentJobStateRecord],
+        current_output_segment_key: &str,
+        current_output_segment_path: &PathBuf,
     ) -> AppResult<Vec<VariantPlaylistSegment>> {
-        latest_segment_states
-            .iter()
-            .map(|segment| {
-                let output_segment_s3_key = segment.output_segment_s3_key.as_deref().ok_or_else(|| {
-                    AppError::internal("completed segment is missing an output segment key")
-                })?;
-                Ok(VariantPlaylistSegment {
-                    duration_seconds: segment.source_segment_duration_seconds,
-                    segment_path: relative_segment_path(video_id, rendition, output_segment_s3_key)?,
-                })
-            })
-            .collect()
+        let probe_directory = processing_directory.join("playlist_probe").join(rendition);
+        tokio::fs::create_dir_all(&probe_directory).await?;
+        let mut playlist_segments = Vec::with_capacity(latest_segment_states.len());
+
+        for segment in latest_segment_states {
+            let output_segment_s3_key = segment.output_segment_s3_key.as_deref().ok_or_else(|| {
+                AppError::internal("completed segment is missing an output segment key")
+            })?;
+            let probe_path = if output_segment_s3_key == current_output_segment_key {
+                current_output_segment_path.clone()
+            } else {
+                let path = probe_directory.join(format!("segment_{:05}.ts", segment.segment_index));
+                self.object_storage
+                    .download_processed_object(output_segment_s3_key, &path)
+                    .await?;
+                path
+            };
+            let duration_seconds = self
+                .media_processor
+                .probe_media_duration_seconds(&probe_path)
+                .await?;
+
+            playlist_segments.push(VariantPlaylistSegment {
+                duration_seconds,
+                segment_path: relative_segment_path(video_id, rendition, output_segment_s3_key)?,
+            });
+        }
+
+        Ok(playlist_segments)
     }
 
     async fn write_variant_playlist(

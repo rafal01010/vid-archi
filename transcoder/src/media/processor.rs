@@ -135,6 +135,10 @@ impl MediaProcessor {
         })
     }
 
+    pub async fn probe_media_duration_seconds(&self, source_path: &Path) -> AppResult<f64> {
+        probe_duration_seconds(&self.ffprobe_binary, source_path, "media duration").await
+    }
+
     async fn probe_source_rotation_degrees(&self, source_path: &Path) -> AppResult<i32> {
         let ffprobe_binary = self.ffprobe_binary.clone();
         let source_path_for_command = source_path.to_path_buf();
@@ -190,6 +194,58 @@ impl MediaProcessor {
             })
             .unwrap_or(0))
     }
+}
+
+async fn probe_duration_seconds(
+    ffprobe_binary: &str,
+    source_path: &Path,
+    probe_label: &str,
+) -> AppResult<f64> {
+    let ffprobe_binary = ffprobe_binary.to_owned();
+    let source_path_for_command = source_path.to_path_buf();
+    let output = task::spawn_blocking(move || {
+        std::process::Command::new(ffprobe_binary)
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("default=noprint_wrappers=1:nokey=1")
+            .arg(source_path_for_command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    })
+    .await
+    .map_err(|error| {
+        AppError::internal_with_context(
+            format!("failed to join ffprobe {probe_label} task"),
+            error.to_string(),
+        )
+    })??;
+
+    if !output.status.success() {
+        return Err(AppError::internal_with_context(
+            format!("ffprobe failed to inspect {probe_label}"),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    let parsed = String::from_utf8_lossy(&output.stdout);
+    let duration_seconds = parsed.trim().parse::<f64>().map_err(|error| {
+        AppError::internal_with_context(
+            format!("failed to parse ffprobe {probe_label} output"),
+            error.to_string(),
+        )
+    })?;
+
+    if duration_seconds <= 0.0 {
+        return Err(AppError::internal(format!(
+            "{probe_label} must be positive"
+        )));
+    }
+
+    Ok(duration_seconds)
 }
 
 fn build_video_filter(rotation_degrees: i32, scaled_width: u32, scaled_height: u32) -> String {
